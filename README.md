@@ -1,7 +1,7 @@
 # bgbw.trends
 
 Pipeline for estimating species distribution, relative abundance, and
-annual trend from Big Garden Birdwatch (BGBW) citizen-science data.
+annual trends from Big Garden Birdwatch survey data.
 
 ## What it does
 
