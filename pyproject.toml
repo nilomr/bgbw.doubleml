@@ -1,0 +1,29 @@
+[project]
+name = "bgbw-trends"
+version = "0.1.0"
+description = "Double Machine Learning trend models for BGBW citizen science bird survey data"
+readme = "README.md"
+authors = [{ name = "nilomr", email = "nilomerinorecalde@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    "scikit-learn>=1.5",
+    "pandas>=2.2",
+    "pyarrow>=17",
+    "numpy>=1.26",
+    "polars>=1.0",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "geopandas>=1.0",
+    "shapely>=2.0",
+    "econml>=0.15",
+    "cuml-cu12>=25.4",
+    "osbng>=0.5.1",
+    "rich>=13.0",
+]
+
+[dependency-groups]
+dev = ["ipykernel>=6.29", "jupyter>=1.1", "pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.9.27,<0.10.0"]
+build-backend = "uv_build"
