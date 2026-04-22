@@ -19,6 +19,7 @@ dependencies = [
     "cuml-cu12>=25.4",
     "osbng>=0.5.1",
     "rich>=13.0",
+    "rasterio>=1.5.0",
 ]
 
 [dependency-groups]

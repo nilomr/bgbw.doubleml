@@ -160,7 +160,6 @@ def _run_pipeline(
         reference_effort=compute_reference_effort(df),
         propensity_covariates=propensity_covariates,
         marginal_covariates=marginal_covariates,
-        n_oof_splits=3,
         seed=seed,
     )
 

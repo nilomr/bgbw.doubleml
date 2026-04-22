@@ -77,7 +77,6 @@ def small_run():
         cfg=cfg,
         grid=grid,
         reference_effort=ReferenceEffort(),
-        n_oof_splits=3,
         seed=0,
     )
     return df, grid, pred
@@ -125,7 +124,7 @@ class TestOobShortcut:
         X = pd.DataFrame(rng.normal(size=(80, 5)))
         y = rng.normal(size=80)
         cfg = RunConfig(n_estimators=30)
-        model, oof = _fit_nuisance(X, y, cfg, n_oof_splits=3, seed=0)
+        model, oof = _fit_nuisance(X, y, cfg, seed=0)
         assert oof.shape == (80,)
         assert np.all(np.isfinite(oof))
         # Same model predicts the same X without needing to refit

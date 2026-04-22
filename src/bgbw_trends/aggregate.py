@@ -122,21 +122,14 @@ def _assign_bng_ref(df: pd.DataFrame) -> pd.DataFrame:
 # ── Aggregation ────────────────────────────────────────────────────────────
 
 
-def aggregate_surveys(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate individual surveys to 1 km BNG cells.
+def prepare_surveys(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare individual surveys for aggregation: filter, derive, assign BNG.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Individual-level harmonized survey data for one or more years.
-        Must contain ``latitude``, ``longitude``, ``postcode_valid``,
-        ``year``, ``source``, ``adults``, ``children``, and species
-        count columns.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per (bng_ref, year) with effort summaries and species means.
+    This is the expensive part of the pipeline (coordinate projection,
+    BNG reference assignment). The ensemble driver calls this once on the
+    full harmonized frame and then subsamples rows before calling
+    ``aggregate_prepared_surveys`` per member, which is pure pandas groupby
+    work and much faster.
     """
     required = {"latitude", "longitude", "postcode_valid", "year",
                 "source", "adults", "children"}
@@ -144,26 +137,29 @@ def aggregate_surveys(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    # Keep only geocoded rows with valid coordinates
     df = df[
         df["postcode_valid"].fillna(False)
         & df["latitude"].notna()
         & df["longitude"].notna()
     ].copy()
 
-    # Derived columns needed for aggregation
     df["_total_observers"] = df["adults"].fillna(0) + df["children"].fillna(0)
     df["_is_online"] = (df["source"] == "online").astype(np.float64)
 
-    # Assign BNG grid references
     df = _assign_bng_ref(df)
     if df.empty:
         raise ValueError("No surveys fell within valid BNG extent")
+    return df
 
+
+def aggregate_prepared_surveys(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate already-prepared individual surveys to 1 km BNG cells.
+
+    Expects output of ``prepare_surveys`` (or a subsampled slice of it).
+    """
     species_cols = _species_columns(df)
     grouped = df.groupby(["bng_ref", "year"])
 
-    # Effort summaries
     effort = grouped.agg(
         n_surveys=("_total_observers", "size"),
         mean_observers=("_total_observers", "mean"),
@@ -178,15 +174,38 @@ def aggregate_surveys(df: pd.DataFrame) -> pd.DataFrame:
     )
     effort = effort.drop(columns=["_sum_adults", "_sum_total"])
 
-    # Species means
     species_means = grouped[species_cols].mean()
-
     result = pd.concat([effort, species_means], axis=1).reset_index()
+    return result
 
+
+def aggregate_surveys(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate individual surveys to 1 km BNG cells.
+
+    Convenience wrapper over ``prepare_surveys`` + ``aggregate_prepared_surveys``.
+    Prefer the two-step API when aggregating many subsamples of the same
+    harmonized frame (ensemble path).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Individual-level harmonized survey data for one or more years.
+        Must contain ``latitude``, ``longitude``, ``postcode_valid``,
+        ``year``, ``source``, ``adults``, ``children``, and species
+        count columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per (bng_ref, year) with effort summaries and species means.
+    """
+    prepared = prepare_surveys(df)
+    result = aggregate_prepared_surveys(prepared)
+    species_cols = _species_columns(prepared)
     logger.info(
         "Aggregated %d surveys -> %d (bng_ref, year) cells "
         "(%d unique cells, %d years, %d species)",
-        len(df),
+        len(prepared),
         len(result),
         result["bng_ref"].nunique(),
         result["year"].nunique(),

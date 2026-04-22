@@ -70,7 +70,6 @@ def _null_species_values(
     species: str,
     cfg: RunConfig,
     rng: np.random.Generator,
-    n_oof_splits: int,
 ) -> np.ndarray:
     """Regenerate the species column under a zero-trend DGP.
 
@@ -85,7 +84,7 @@ def _null_species_values(
     # Occurrence null — Bernoulli(p̂(X))
     y_bin = (df[species] > 0).to_numpy(dtype=np.float64)
     _occ_forest, p_hat = _fit_nuisance(
-        X, y_bin, cfg, n_oof_splits=n_oof_splits, seed=int(rng.integers(0, 2**31))
+        X, y_bin, cfg, seed=int(rng.integers(0, 2**31))
     )
     p_hat = np.clip(p_hat, 0.0, 1.0)
     y_bin_null = rng.binomial(1, p_hat).astype(np.float64)
@@ -94,7 +93,7 @@ def _null_species_values(
     # parametric bootstrap with empirical residual SD (vignette L319-320).
     count_null = np.zeros(len(df), dtype=np.float64)
     orig_detected = y_bin > 0
-    if orig_detected.sum() < max(50, n_oof_splits * 2):
+    if orig_detected.sum() < 50:
         # Not enough detections to fit a count-null generator; leave zeros.
         # (train_predict_species will then fail on this stage — caller
         # should treat this as an inconclusive diagnostic.)
@@ -103,8 +102,7 @@ def _null_species_values(
     Y_log = np.log1p(df.loc[orig_detected, species].to_numpy(dtype=np.float64))
     X_det = X.iloc[orig_detected.nonzero()[0]].reset_index(drop=True)
     _count_forest, m_count_oof = _fit_nuisance(
-        X_det, Y_log, cfg, n_oof_splits=n_oof_splits,
-        seed=int(rng.integers(0, 2**31)),
+        X_det, Y_log, cfg, seed=int(rng.integers(0, 2**31)),
     )
     resid_sd = float(np.std(Y_log - m_count_oof, ddof=0))
 
@@ -165,9 +163,7 @@ def diagnose_residual_confounding(
         null_df = df.iloc[boot_idx].reset_index(drop=True)
 
         # Steps 2–3 — regenerate the species column under a zero-trend DGP.
-        null_df[species] = _null_species_values(
-            null_df, species, cfg, rng, n_oof_splits=3
-        )
+        null_df[species] = _null_species_values(null_df, species, cfg, rng)
 
         # Step 4 — run the real pipeline on the null data.
         try:
@@ -178,7 +174,6 @@ def diagnose_residual_confounding(
                 cfg=cfg,
                 grid=grid,
                 reference_effort=reference_effort,
-                n_oof_splits=3,
                 seed=int(rng.integers(0, 2**31)),
             )
         except Exception as e:

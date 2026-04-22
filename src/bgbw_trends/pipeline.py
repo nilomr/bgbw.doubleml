@@ -13,12 +13,9 @@ nuisance fits for both:
    propensity forests' out-of-bag predictions as ``Y.hat`` and ``W.hat``
    (Fink §2.1, Eq. 4 — the residual-on-residual regression).
 
-On the sklearn backend the OOB predictions come for free from the bagging
-process (``oob_score=True``), matching ``grf::regression_forest``'s internal
-behaviour — 1 forest fit per nuisance. On the cuml backend, which lacks a
-public OOB API, we do a K-fold cross-fit and *reuse* the fold models for
-SDM prediction (averaging their grid predictions), so the total is
-K forest fits per nuisance — not K + 1. K defaults to 3.
+OOB predictions come for free from the bagging process (``oob_score=True``),
+matching ``grf::regression_forest``'s internal behaviour — 1 forest fit per
+nuisance. SHAP's TreeExplainer supports sklearn forests natively.
 
 Chain rule for the two-part abundance trend (Fink §3.2 / train-predict.R L197):
 
@@ -38,6 +35,7 @@ from typing import Sequence
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestRegressor as _RF
 from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
@@ -46,23 +44,11 @@ from sklearn.metrics import (
     r2_score,
     roc_auc_score,
 )
-from sklearn.model_selection import KFold
 
 from bgbw_trends.config import ReferenceEffort, RunConfig
 from bgbw_trends.features.effort import make_effort_features
 from bgbw_trends.features.habitat import make_habitat_features, make_spatial_features_W
 
-try:
-    from cuml.ensemble import RandomForestRegressor as _CumlRF
-
-    _HAS_CUML = True
-except ImportError:
-    _CumlRF = None
-    _HAS_CUML = False
-
-from sklearn.ensemble import RandomForestRegressor as _SklearnRF
-
-_BACKEND = "cuml" if _HAS_CUML else "sklearn"
 logger = logging.getLogger(__name__)
 
 
@@ -107,7 +93,7 @@ def _r2_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
 # ── RF factory + OOB fit ──────────────────────────────────────────────────
 
 
-def _make_rf(cfg: RunConfig, n_samples: int | None = None):
+def _make_rf(cfg: RunConfig):
     """Random Forest for nuisance models (marginal response + propensity).
 
     Mirrors ``grf::regression_forest`` with ``tune.parameters="all"`` in
@@ -115,26 +101,16 @@ def _make_rf(cfg: RunConfig, n_samples: int | None = None):
     (following grf, which fits the 0/1 indicator as regression to get
     calibrated probability estimates rather than using a classifier).
 
-    On the sklearn path we enable ``oob_score=True`` so out-of-bag
-    predictions are available immediately after ``fit`` — matching grf's
-    native OOB behaviour and sparing us a separate K-fold cross-fit.
+    Hyperparameters follow grf defaults: unconstrained depth, leaves
+    sized by ``min_samples_leaf`` (configurable on ``RunConfig``). OOB
+    predictions are enabled so the full-data fit immediately exposes
+    out-of-bag estimates, matching grf's native OOB behaviour — 1 fit
+    per nuisance, no separate K-fold cross-fit required.
     """
-    if _BACKEND == "cuml":
-        # n_bins must not exceed training size; clamp to avoid warnings
-        # and degenerate splits on small subsamples.
-        n_bins = 128 if n_samples is None else max(8, min(128, n_samples))
-        return _CumlRF(
-            n_estimators=cfg.n_estimators,
-            max_depth=12,
-            max_features="sqrt",
-            n_bins=n_bins,
-            bootstrap=True,
-        )
-    return _SklearnRF(
+    return _RF(
         n_estimators=cfg.n_estimators,
-        max_depth=12,
+        min_samples_leaf=cfg.rf_min_samples_leaf,
         max_features="sqrt",
-        min_samples_leaf=5,
         bootstrap=True,
         oob_score=True,
         n_jobs=-1,
@@ -142,29 +118,8 @@ def _make_rf(cfg: RunConfig, n_samples: int | None = None):
 
 
 def _predict(model, X: pd.DataFrame | np.ndarray) -> np.ndarray:
-    """Robust predict -> 1-D float64 numpy array (handles cuDF/cuPy outputs)."""
-    out = model.predict(X)
-    if hasattr(out, "to_numpy"):
-        out = out.to_numpy()
-    return np.asarray(out, dtype=np.float64).ravel()
-
-
-class _FoldEnsemble:
-    """Averages predictions from a set of K-fold forests.
-
-    Used on the cuml backend to stand in for a single full-data forest:
-    each fold-model has seen (K-1)/K of the training data, and averaging
-    their grid predictions gives an estimate close to what a full-data
-    forest would produce — without paying for the extra fit.
-    """
-
-    __slots__ = ("models",)
-
-    def __init__(self, models: list) -> None:
-        self.models = models
-
-    def predict(self, X) -> np.ndarray:
-        return np.mean(np.stack([_predict(m, X) for m in self.models], axis=0), axis=0)
+    """Robust predict -> 1-D float64 numpy array."""
+    return np.asarray(model.predict(X), dtype=np.float64).ravel()
 
 
 def _fit_nuisance(
@@ -172,39 +127,23 @@ def _fit_nuisance(
     y: np.ndarray,
     cfg: RunConfig,
     *,
-    n_oof_splits: int,
     seed: int,
 ):
     """Fit a nuisance RF and return ``(model, oof_predictions)``.
 
-    **sklearn path** — one forest fit, OOB predictions from bagging,
-    exactly mirroring ``grf::regression_forest`` (1 fit total).
-
-    **cuml path** — K-fold cross-fit where each fold-model serves *both*
-    the OOF prediction for its test fold *and* (averaged with siblings)
-    the grid prediction. This halves the work vs. the previous "full
-    fit + separate K-fold" scheme (K fits vs. K+1, and K defaults to 3).
+    One forest fit; OOB predictions come from bagging, exactly mirroring
+    ``grf::regression_forest`` (1 fit total, no separate K-fold cross-fit).
+    The ``seed`` argument is accepted for API symmetry across the four
+    nuisance fits but is not used — sklearn RF is seeded via ``RunConfig``
+    or left as the global numpy RNG.
     """
-    if _BACKEND == "sklearn":
-        model = _make_rf(cfg, n_samples=len(y))
-        model.fit(X, y)
-        oob = np.asarray(model.oob_prediction_, dtype=np.float64).ravel()
-        bad = ~np.isfinite(oob)
-        if bad.any():
-            oob[bad] = _predict(model, X.iloc[bad.nonzero()[0]])
-        return model, oob
-
-    # cuml: K-fold cross-fit, reuse fold models for grid prediction.
-    kf = KFold(n_splits=n_oof_splits, shuffle=True, random_state=seed)
-    oof = np.full(len(y), np.nan, dtype=np.float64)
-    models = []
-    fold_n = len(y) - (len(y) // n_oof_splits)
-    for tr, te in kf.split(X):
-        m = _make_rf(cfg, n_samples=fold_n)
-        m.fit(X.iloc[tr], y[tr])
-        oof[te] = _predict(m, X.iloc[te])
-        models.append(m)
-    return _FoldEnsemble(models), oof
+    model = _make_rf(cfg)
+    model.fit(X, y)
+    oob = np.asarray(model.oob_prediction_, dtype=np.float64).ravel()
+    bad = ~np.isfinite(oob)
+    if bad.any():
+        oob[bad] = _predict(model, X.iloc[bad.nonzero()[0]])
+    return model, oob
 
 
 # ── Prediction-unit construction ───────────────────────────────────────────
@@ -215,12 +154,16 @@ def _build_prediction_effort(
 ) -> pd.DataFrame:
     """Broadcast reference-effort values across ``n`` grid cells.
 
-    Any training-effort column without a named attribute on
-    ``ReferenceEffort`` falls back to its training-data median, matching
-    Fink's workflow which uses median effort (cci → 75th pct) for the SRD
-    prediction unit (see workflow/train.R L110-122). This is the BGBW
-    analogue of Fink's ``multivariate_maximize`` — BGBW has no weather /
-    time-of-day covariates aggregated at the cell level.
+    Implements Fink's ``prediction_unit`` (workflow/train.R L108-125): freeze
+    effort covariates to representative values so the SDM reflects habitat,
+    not sampling intensity. Fink uses median for all effort features except CCI
+    (observer skill), which uses the 75th percentile to represent a skilled
+    observer. BGBW has no CCI analogue, so all features fall back to median.
+
+    Fink's separate ``covariates_to_maximize`` mechanism (weather, time-of-day
+    set to optimal-detection values via ``multivariate_maximize``) is not
+    implemented here — BGBW is a single weekend event with no intra-annual
+    detection-condition covariates to optimise over.
     """
     out = {}
     for col in training_effort.columns:
@@ -234,6 +177,28 @@ def _build_prediction_effort(
 
 
 # ── Result container ───────────────────────────────────────────────────────
+
+
+@dataclass
+class TrainedSpeciesModels:
+    """Fitted forests and training matrices for post-hoc interpretation.
+
+    Returned from ``train_predict_species(..., return_models=True)`` alongside
+    a :class:`SpeciesPrediction`. Used by :mod:`bgbw_trends.interpret` to
+    compute SHAP values for the marginal forests (SDM drivers) and for
+    τ(W) via a surrogate model. Also the right object to pass into
+    :func:`predict_grid_variance` if you need sigmas on a subset of cells.
+    """
+
+    y_bin_forest: object
+    y_count_forest: object
+    bin_cf: object  # econml.grf.CausalForest (occurrence)
+    count_cf: object  # econml.grf.CausalForest (count)
+    X_marg_occ: pd.DataFrame
+    X_marg_count: pd.DataFrame
+    W_occ: np.ndarray
+    W_count: np.ndarray
+    W_feature_names: list[str]
 
 
 @dataclass
@@ -268,7 +233,6 @@ class SpeciesPrediction:
     # Bookkeeping
     n_train_occ: int
     n_train_count: int
-    backend: str = field(default=_BACKEND)
 
     # Per-observation PLR components, for yearly-trend and calibration plots.
     # Columns: year, raw, m_hat, s_hat, tau. With these any plot-side
@@ -323,6 +287,40 @@ def _assemble_W(
     return df[list(columns)].astype(np.float64).to_numpy()
 
 
+def _assemble_W_names(
+    df: pd.DataFrame,
+    columns: Sequence[str] | None,
+) -> list[str]:
+    """Names of the columns that ``_assemble_W`` produces, in order."""
+    if columns is None:
+        return list(make_spatial_features_W(df).columns)
+    return list(columns)
+
+
+def predict_grid_variance(
+    models: "TrainedSpeciesModels",
+    grid: pd.DataFrame,
+    *,
+    treatment_covariates: Sequence[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute τ(W) standard errors on a grid using the trained causal forests.
+
+    Split out from ``train_predict_species`` because variance estimation
+    via ``predict_and_var`` is expensive at 1 km BGBW scale — often 5-10×
+    the cost of the point prediction. Call this only on the cells you
+    actually plan to map with significance shading, e.g. a filtered
+    subset of the full grid.
+
+    Returns ``(sigma_occ, sigma_count)`` aligned with ``grid`` rows.
+    """
+    W_grid = _assemble_W(grid, treatment_covariates)
+    _, var_occ = models.bin_cf.predict_and_var(W_grid)
+    _, var_count = models.count_cf.predict_and_var(W_grid)
+    sigma_occ = np.sqrt(np.asarray(var_occ).reshape(len(W_grid), -1)[:, 0])
+    sigma_count = np.sqrt(np.asarray(var_count).reshape(len(W_grid), -1)[:, 0])
+    return sigma_occ, sigma_count
+
+
 # ── The pipeline ──────────────────────────────────────────────────────────
 
 
@@ -337,9 +335,10 @@ def train_predict_species(
     propensity_covariates: Sequence[str] | None = None,
     marginal_covariates: Sequence[str] | None = None,
     treatment_covariates: Sequence[str] | None = None,
-    n_oof_splits: int = 3,
     seed: int = 0,
-) -> SpeciesPrediction:
+    compute_variance: bool = False,
+    return_models: bool = False,
+) -> "SpeciesPrediction | tuple[SpeciesPrediction, TrainedSpeciesModels]":
     """Fit the two-part DML trend + SDM for one species.
 
     Parameters
@@ -368,11 +367,14 @@ def train_predict_species(
     treatment_covariates
         Feature set over which τ(W) varies. ``None`` →
         embeddings + lat/lon (Fink §3.3).
-    n_oof_splits
-        K for the K-fold OOF fallback (cuml backend only). On sklearn,
-        OOB is used instead and this is ignored.
     seed
-        Random seed for the K-fold split and causal forest.
+        Random seed for the causal forest.
+    compute_variance
+        If True, call ``CausalForest.predict_and_var`` on the grid to
+        populate ``occ_sigma`` / ``count_sigma``. This is expensive at
+        grid scale; default False (sigma arrays are returned empty).
+        Use :func:`predict_grid_variance` to compute sigmas separately
+        on a subset of cells when needed for significance maps.
 
     Returns
     -------
@@ -382,9 +384,8 @@ def train_predict_species(
     from econml.grf import CausalForest
 
     logger.info(
-        "train_predict_species[%s] backend=%s n_occ=%d n_count=%d",
+        "train_predict_species[%s] n_occ=%d n_count=%d",
         species,
-        _BACKEND,
         len(df_occ),
         len(df_count),
     )
@@ -407,13 +408,9 @@ def train_predict_species(
         X_prop_occ = _assemble_X(df_occ, propensity_covariates)
     W_occ = _assemble_W(df_occ, treatment_covariates)
 
-    y_bin_forest, Y_bin_hat = _fit_nuisance(
-        X_marg_occ, Y_bin, cfg, n_oof_splits=n_oof_splits, seed=seed
-    )
+    y_bin_forest, Y_bin_hat = _fit_nuisance(X_marg_occ, Y_bin, cfg, seed=seed)
     Y_bin_hat = np.clip(Y_bin_hat, 0.0, 1.0)
-    _, W_bin_hat = _fit_nuisance(
-        X_prop_occ, T_occ, cfg, n_oof_splits=n_oof_splits, seed=seed + 1
-    )
+    _, W_bin_hat = _fit_nuisance(X_prop_occ, T_occ, cfg, seed=seed + 1)
 
     # Causal forest on residuals → τ_occ(W). econml's CausalForest does
     # not accept pre-computed Y.hat / W.hat (unlike grf), so we pass
@@ -432,7 +429,7 @@ def train_predict_species(
     # ── Count stage — detected rows only, log1p outcome ────────────────
     detected = (df_count[species] > 0).to_numpy(dtype=bool)
     dc = df_count.loc[detected].reset_index(drop=True)
-    if len(dc) < max(50, n_oof_splits * 2):
+    if len(dc) < 50:
         raise ValueError(
             f"train_predict_species[{species}]: only {len(dc)} detections — "
             "too few to fit the count stage"
@@ -453,11 +450,9 @@ def train_predict_species(
     W_count = _assemble_W(dc, treatment_covariates)
 
     y_count_forest, Y_count_hat = _fit_nuisance(
-        X_marg_count, Y_log, cfg, n_oof_splits=n_oof_splits, seed=seed + 2
+        X_marg_count, Y_log, cfg, seed=seed + 2
     )
-    _, W_count_hat = _fit_nuisance(
-        X_prop_count, T_count, cfg, n_oof_splits=n_oof_splits, seed=seed + 3
-    )
+    _, W_count_hat = _fit_nuisance(X_prop_count, T_count, cfg, seed=seed + 3)
 
     diagnostics = SpeciesModelDiagnostics(
         occurrence_brier=float(brier_score_loss(Y_bin, Y_bin_hat)),
@@ -552,13 +547,23 @@ def train_predict_species(
     e_abundance = p_occ * e_count
 
     # ── Trend prediction at the grid ──────────────────────────────────
+    # Variance estimation (predict_and_var) is expensive at grid scale —
+    # it computes per-tree leaf statistics for every cell. Default is
+    # point prediction only; call predict_grid_variance separately when
+    # significance maps are needed.
     W_grid = _assemble_W(grid, treatment_covariates)
-    tau_occ, var_occ = bin_cf.predict_and_var(W_grid)
-    tau_count, var_count = count_cf.predict_and_var(W_grid)
-    tau_occ = np.asarray(tau_occ).ravel()
-    tau_count = np.asarray(tau_count).ravel()
-    sigma_occ = np.sqrt(np.asarray(var_occ).reshape(len(tau_occ), -1)[:, 0])
-    sigma_count = np.sqrt(np.asarray(var_count).reshape(len(tau_count), -1)[:, 0])
+    if compute_variance:
+        tau_occ, var_occ = bin_cf.predict_and_var(W_grid)
+        tau_count, var_count = count_cf.predict_and_var(W_grid)
+        tau_occ = np.asarray(tau_occ).ravel()
+        tau_count = np.asarray(tau_count).ravel()
+        sigma_occ = np.sqrt(np.asarray(var_occ).reshape(len(tau_occ), -1)[:, 0])
+        sigma_count = np.sqrt(np.asarray(var_count).reshape(len(tau_count), -1)[:, 0])
+    else:
+        tau_occ = np.asarray(bin_cf.predict(W_grid)).ravel()
+        tau_count = np.asarray(count_cf.predict(W_grid)).ravel()
+        sigma_occ = np.array([], dtype=np.float64)
+        sigma_count = np.array([], dtype=np.float64)
 
     # Chain rule (Fink train-predict.R L197-199): occurrence CATE is an
     # absolute-probability rate; dividing by P(occ) converts it to a
@@ -582,7 +587,7 @@ def train_predict_species(
         float(np.nanmean(abd_ppy)) * 100,
     )
 
-    return SpeciesPrediction(
+    prediction = SpeciesPrediction(
         species=species,
         bng_ref=grid["bng_ref"].to_numpy(),
         p_occurrence=p_occ,
@@ -601,3 +606,18 @@ def train_predict_species(
         ate_occ=ate_occ,
         ate_count=ate_count,
     )
+    if return_models:
+        W_names = _assemble_W_names(df_occ, treatment_covariates)
+        models = TrainedSpeciesModels(
+            y_bin_forest=y_bin_forest,
+            y_count_forest=y_count_forest,
+            bin_cf=bin_cf,
+            count_cf=count_cf,
+            X_marg_occ=X_marg_occ,
+            X_marg_count=X_marg_count,
+            W_occ=W_occ,
+            W_count=W_count,
+            W_feature_names=W_names,
+        )
+        return prediction, models
+    return prediction

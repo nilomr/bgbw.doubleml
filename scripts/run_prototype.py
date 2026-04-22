@@ -46,11 +46,17 @@ from bgbw_trends.data import (
 )
 from bgbw_trends.features.effort import compute_reference_effort
 from bgbw_trends.features.habitat import reduce_embeddings_pca
+from bgbw_trends.interpret import (
+    explain_cate_surrogate,
+    explain_tree_model,
+    plot_shap_panel,
+)
 from bgbw_trends.pipeline import train_predict_species
 from bgbw_trends.plotting import (
+    plot_prediction_distribution_summary,
     plot_raw_vs_fitted,
     plot_sdm_prediction_maps,
-    plot_trend_map,
+    plot_trend_ppy_panels,
     plot_yearly_trend,
 )
 from bgbw_trends.trends import (
@@ -71,18 +77,36 @@ def _build_grid(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _subsample_by_year(
+    df: pd.DataFrame,
+    fraction: float,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Stratified-by-year subsample of aggregated cell-year rows.
+
+    Johnston §3.4: the occurrence and count halves of the hurdle must be
+    fit on *independent* draws so the chain-rule sum is unbiased.
+    """
+    frames = []
+    for _year, group in df.groupby("year"):
+        n_sample = max(1, int(len(group) * fraction))
+        idx = rng.choice(group.index, size=n_sample, replace=False)
+        frames.append(group.loc[idx])
+    return pd.concat(frames, ignore_index=True)
+
+
 def main() -> None:
     # ── Configuration ───────────────────────────────────────────────────
     run_ensemble = True  # slow — set True for uncertainty quantification
 
     cfg = RunConfig(
-        species=["chaffinch"],
-        years=[2015, 2025],
+        species=["house_sparrow"],
+        years=[2005, 2015, 2025],
         embedding_year=2019,
         output_dir=Path("output/prototype"),
         n_folds=3,
         n_rep=3,
-        n_pca_components=5,
+        n_pca_components=4,
         n_estimators=300,
         cf_n_estimators=500,
         cf_min_samples_leaf=50,
@@ -134,22 +158,32 @@ def main() -> None:
     )
 
     # ── Two-part DML trend + SDM (Fink §3.2) ────────────────────────────
+    # Johnston §3.4: draw two independent year-stratified subsamples of
+    # the aggregated cell-year rows so the occurrence and count halves of
+    # the hurdle see non-overlapping bootstraps — keeps the chain-rule
+    # sum abd_ppy = occ_ppy + count_ppy unbiased.
     section("Two-part DML trend + SDM")
     console.print()
     predictions = {}
+    trained_models = {}
+    rng = np.random.default_rng(cfg.__dict__.get("seed", 42))
     with make_progress() as prog:
         task = prog.add_task("train_predict_species", total=len(cfg.species))
         for sp in cfg.species:
             prog.update(task, description=f"train_predict_species  [{sp}]")
-            pred = train_predict_species(
-                df,
-                df,
+            df_occ = _subsample_by_year(df, 0.75, rng)
+            df_count = _subsample_by_year(df, 0.75, rng)
+            pred, models = train_predict_species(
+                df_occ,
+                df_count,
                 species=sp,
                 cfg=cfg,
                 grid=grid,
                 reference_effort=cfg.reference_effort,
+                return_models=True,
             )
             predictions[sp] = pred
+            trained_models[sp] = models
             prog.advance(task)
 
     for sp, pred in predictions.items():
@@ -203,19 +237,20 @@ def main() -> None:
     )
 
     for sp, pred in predictions.items():
-        out_df = pd.DataFrame(
-            {
-                "bng_ref": pred.bng_ref,
-                "p_occurrence": pred.p_occurrence,
-                "e_count_given_occ": pred.e_count_given_occ,
-                "e_abundance": pred.e_abundance,
-                "occ_ppy": pred.occ_ppy,
-                "count_ppy": pred.count_ppy,
-                "abd_ppy": pred.abd_ppy,
-                "occ_sigma": pred.occ_sigma,
-                "count_sigma": pred.count_sigma,
-            }
-        )
+        cols = {
+            "bng_ref": pred.bng_ref,
+            "p_occurrence": pred.p_occurrence,
+            "e_count_given_occ": pred.e_count_given_occ,
+            "e_abundance": pred.e_abundance,
+            "occ_ppy": pred.occ_ppy,
+            "count_ppy": pred.count_ppy,
+            "abd_ppy": pred.abd_ppy,
+        }
+        if pred.occ_sigma.size == len(pred.bng_ref):
+            cols["occ_sigma"] = pred.occ_sigma
+        if pred.count_sigma.size == len(pred.bng_ref):
+            cols["count_sigma"] = pred.count_sigma
+        out_df = pd.DataFrame(cols)
         species_pred_path = out.species_prediction_file(sp)
         species_pred_path.parent.mkdir(parents=True, exist_ok=True)
         out_df.to_parquet(species_pred_path)
@@ -224,18 +259,64 @@ def main() -> None:
         species_fig_dir.mkdir(parents=True, exist_ok=True)
 
         plot_sdm_prediction_maps(pred, output_path=out.species_sdm_figure(sp))
-        plot_trend_map(
+        plot_trend_ppy_panels(
             pred,
-            metric="abd_ppy",
-            output_path=out.species_trend_figure(sp, "abd_ppy"),
+            output_path=out.species_trend_ppy_panels_figure(sp),
         )
-        plot_trend_map(
+        plot_prediction_distribution_summary(
             pred,
-            metric="occ_ppy",
-            output_path=out.species_trend_figure(sp, "occ_ppy"),
+            output_path=out.species_distribution_summary_figure(sp),
         )
         plot_yearly_trend(pred, output_path=out.species_yearly_trend_figure(sp))
         plot_raw_vs_fitted(pred, output_path=out.species_raw_vs_fitted_figure(sp))
+
+    # ── SHAP interpretability ───────────────────────────────────────────
+    # SDM drivers: exact TreeExplainer on the marginal forests.
+    # τ(W) drivers: surrogate RandomForest on τ̂(W), then TreeExplainer —
+    # econml.grf.CausalForest has no native SHAP hook (unlike CausalForestDML).
+    import matplotlib.pyplot as plt
+
+    section("SHAP interpretability")
+    console.print()
+    for sp, models in trained_models.items():
+        sp_label = sp.replace("_", " ").title()
+        console.print(f"  [dim]{sp}[/dim]  SDM marginal forests…")
+        with timed_step("  SDM occ SHAP"):
+            occ_expl = explain_tree_model(models.y_bin_forest, models.X_marg_occ)
+        with timed_step("  SDM count SHAP"):
+            count_expl = explain_tree_model(models.y_count_forest, models.X_marg_count)
+        console.print(f"  [dim]{sp}[/dim]  CATE surrogate forests…")
+        with timed_step("  CATE occ SHAP"):
+            cate_occ_expl = explain_cate_surrogate(
+                models.bin_cf, models.W_occ, models.W_feature_names
+            )
+        with timed_step("  CATE count SHAP"):
+            cate_count_expl = explain_cate_surrogate(
+                models.count_cf, models.W_count, models.W_feature_names
+            )
+
+        fig = plot_shap_panel(
+            occ_expl,
+            count_expl,
+            title_left="Occurrence stage",
+            title_right="Count stage (given detection)",
+            suptitle=f"{sp_label} — SDM feature attribution",
+            footer="SHAP values from marginal response forests  •  colour = feature value",
+            output_path=out.species_shap_figure(sp, "sdm"),
+        )
+        plt.close(fig)
+
+        fig = plot_shap_panel(
+            cate_occ_expl,
+            cate_count_expl,
+            title_left="Occurrence CATE  τ_occ(W)",
+            title_right="Count CATE  τ_count(W)",
+            suptitle=f"{sp_label} — What drives spatial variation in trend?",
+            footer="SHAP attribution via surrogate RandomForest on τ̂(W)",
+            output_path=out.species_shap_figure(sp, "cate"),
+        )
+        plt.close(fig)
+        console.print(f"  [dim]{sp}:[/dim] SDM → shap_sdm.png  •  CATE → shap_cate.png")
 
     # ── Residual confounding diagnostic ─────────────────────────────────
     section("Residual confounding diagnostic")
@@ -299,6 +380,11 @@ def main() -> None:
                 "e_abundance": ens.e_abundance,
             }
         ).to_parquet(ensemble_path)
+        plot_prediction_distribution_summary(
+            predictions[cfg.species[0]],
+            ensemble=ens,
+            output_path=out.species_distribution_summary_figure(cfg.species[0]),
+        )
         console.print(
             f"  [dim]{ens.n_successful}/{ens.n_ensemble} members successful[/dim]"
         )

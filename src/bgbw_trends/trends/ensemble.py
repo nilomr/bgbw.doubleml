@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from bgbw_trends.aggregate import aggregate_surveys
+from bgbw_trends.aggregate import aggregate_prepared_surveys, prepare_surveys
 from bgbw_trends.config import ReferenceEffort, RunConfig
 from bgbw_trends.features.effort import compute_reference_effort
 from bgbw_trends.features.habitat import apply_embedding_pca, reduce_embeddings_pca
@@ -55,27 +55,27 @@ class EnsembleTrendResult:
     subsample_fraction: float
 
 
-def _subsample_surveys(
-    harmonized: pd.DataFrame,
+def _subsample_prepared(
+    prepared: pd.DataFrame,
     fraction: float,
     rng: np.random.Generator,
 ) -> pd.DataFrame:
-    """Sample ``fraction`` of surveys, stratified by year."""
+    """Sample ``fraction`` of prepared (BNG-assigned) surveys, stratified by year."""
     frames = []
-    for _year, group in harmonized.groupby("year"):
+    for _year, group in prepared.groupby("year"):
         n_sample = max(1, int(len(group) * fraction))
         idx = rng.choice(group.index, size=n_sample, replace=False)
         frames.append(group.loc[idx])
     return pd.concat(frames, ignore_index=True)
 
 
-def _build_analysis_df(
-    surveys: pd.DataFrame,
+def _aggregate_and_merge(
+    prepared: pd.DataFrame,
     embeddings: pd.DataFrame,
     pca_model: dict | None = None,
 ) -> pd.DataFrame:
-    """Aggregate subsampled surveys to BNG cells and join with embeddings."""
-    agg = aggregate_surveys(surveys)
+    """Groupby → aggregate → merge embeddings → optional PCA apply."""
+    agg = aggregate_prepared_surveys(prepared)
     merged = agg.merge(embeddings, left_on="bng_ref", right_index=True, how="inner")
     if pca_model is not None:
         merged = apply_embedding_pca(merged, pca_model)
@@ -125,6 +125,16 @@ def fit_ensemble_trend(
     """
     rng = np.random.default_rng(seed)
 
+    # Run the expensive BNG-assignment and coordinate-transform step once;
+    # per-member resampling happens on the prepared frame which only has to
+    # do a groupby.
+    prepared = prepare_surveys(harmonized)
+    logger.info(
+        "Prepared harmonized frame once: %d surveys across %d years",
+        len(prepared),
+        prepared["year"].nunique(),
+    )
+
     draws_occ: list[np.ndarray] = []
     draws_count: list[np.ndarray] = []
     draws_abd: list[np.ndarray] = []
@@ -135,18 +145,21 @@ def fit_ensemble_trend(
     for i in range(n_ensemble):
         logger.info("Ensemble member %d/%d", i + 1, n_ensemble)
         try:
-            occ_surveys = _subsample_surveys(harmonized, subsample_fraction, rng)
-            count_surveys = _subsample_surveys(harmonized, subsample_fraction, rng)
+            occ_prep = _subsample_prepared(prepared, subsample_fraction, rng)
+            count_prep = _subsample_prepared(prepared, subsample_fraction, rng)
 
-            occ_df = _build_analysis_df(occ_surveys, embeddings, pca_model)
-            count_df = _build_analysis_df(count_surveys, embeddings, pca_model)
-
-            # Fit PCA on first successful member if not supplied
+            # Fit PCA on first successful member's aggregated occ frame if
+            # not supplied; reuse for count so both halves share feature
+            # space (avoids mixed raw + reduced embedding columns).
             if pca_model is None and cfg.n_pca_components:
+                occ_df_raw = _aggregate_and_merge(occ_prep, embeddings, None)
                 occ_df, pca_model = reduce_embeddings_pca(
-                    occ_df, cfg.n_pca_components
+                    occ_df_raw, cfg.n_pca_components
                 )
-                count_df = _build_analysis_df(count_surveys, embeddings, pca_model)
+                count_df = _aggregate_and_merge(count_prep, embeddings, pca_model)
+            else:
+                occ_df = _aggregate_and_merge(occ_prep, embeddings, pca_model)
+                count_df = _aggregate_and_merge(count_prep, embeddings, pca_model)
 
             if reference_effort is None:
                 reference_effort = compute_reference_effort(occ_df)

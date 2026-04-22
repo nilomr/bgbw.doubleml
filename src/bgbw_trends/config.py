@@ -188,6 +188,12 @@ class OutputPaths:
     def species_trend_figure(self, species: str, metric: str) -> Path:
         return self.species_figures_dir(species) / f"trend_{metric}.png"
 
+    def species_trend_ppy_panels_figure(self, species: str) -> Path:
+        return self.species_figures_dir(species) / "trend_ppy_panels.png"
+
+    def species_distribution_summary_figure(self, species: str) -> Path:
+        return self.species_figures_dir(species) / "distribution_summary.png"
+
     def species_yearly_trend_figure(self, species: str) -> Path:
         return self.species_figures_dir(species) / "yearly_trend.png"
 
@@ -196,6 +202,11 @@ class OutputPaths:
 
     def species_ensemble_file(self, species: str) -> Path:
         return self.ensemble_dir / species / "ensemble.parquet"
+
+    def species_shap_figure(self, species: str, which: str) -> Path:
+        """SHAP figure path. ``which`` is e.g. ``sdm_occ``, ``sdm_count``,
+        ``cate_occ``, ``cate_count``; also ``_bar`` / ``_beeswarm`` suffixes."""
+        return self.species_figures_dir(species) / f"shap_{which}.png"
 
 
 # ── Run configuration ───────────────────────────────────────────────────────
@@ -218,6 +229,9 @@ class RunConfig:
     n_folds: int = 5
     n_rep: int = 5  # repeated cross-fitting; median aggregation (§5 Step 4)
     n_estimators: int = 500
+    # grf's default for regression forests is 5. With BGBW's ~1-2 surveys
+    # per cell and rare detections, 10-20 gives smoother nuisance fits.
+    rf_min_samples_leaf: int = 10
 
     # Causal Forest settings (econml)
     cf_n_estimators: int = 500
