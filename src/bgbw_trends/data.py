@@ -14,10 +14,13 @@ import numpy as np
 import pandas as pd
 
 from bgbw_trends.aggregate import aggregate_surveys
+from osbng.indexing import xy_to_bng
+from bgbw_trends.aggregate import BNG_RESOLUTION
 from bgbw_trends.config import (
+    AEF_DIR,
     BNG_SURVEYS_DIR,
-    GEOTESSERA_DIR,
     HARMONIZED_DIR,
+    WEATHER_PATH,
     RunConfig,
 )
 
@@ -62,10 +65,10 @@ _STAT_PREFIXES: dict[str, str] = {
 
 def load_embeddings(
     year: int = 2019,
-    directory: Path = GEOTESSERA_DIR,
+    directory: Path = AEF_DIR,
     summaries: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Load geospatial embeddings and expand list columns into a matrix.
+    """Load AEF geospatial embeddings and expand list columns into a matrix.
 
     Returns a DataFrame indexed by ``bng_ref`` with columns
     ``emb_0..{d-1}`` (mean) plus any requested distributional summaries:
@@ -77,11 +80,11 @@ def load_embeddings(
     year : int
         Embedding snapshot year.
     directory : Path
-        Directory containing parquet files.
+        Directory containing AEF parquet files.
     summaries : list[str] or None
         Which distributional summaries to include. Must be a subset of
         {"mean", "std", "median", "p10", "p90"}. Defaults to
-        ["mean", "std", "p10", "p90"] (mean + heterogeneity/range stats).
+        ["mean", "std"] (mean + spread stats).
         "mean" is always included even if absent from the list.
     """
     if summaries is None:
@@ -90,7 +93,7 @@ def load_embeddings(
     if "mean" not in summaries:
         summaries = ["mean"] + list(summaries)
 
-    path = directory / f"bng1km_{year}.parquet"
+    path = directory / f"aef_bng1km_{year}_uk.parquet"
     if not path.exists():
         raise FileNotFoundError(f"No embedding data for {year}: {path}")
     raw = pd.read_parquet(path, columns=["bng_ref", "n_pixels"] + summaries)
@@ -118,6 +121,68 @@ def load_embeddings(
         emb_dim,
     )
     return result
+
+
+def load_weather(
+    years: list[int],
+    path: Path = WEATHER_PATH,
+) -> pd.DataFrame:
+    """Load HadUK-Grid survey-weekend weather and aggregate to 1 km BNG cells.
+
+    Reads the weather parquet produced by ``sources/weather/fetch_haduk.py``,
+    converts OSGB coordinates to BNG refs, then returns one row per
+    (bng_ref, year) with two effort-adjacent weather summaries:
+
+    - ``mean_temp_c``  : mean of daily mean temperature across survey days (°C)
+    - ``total_rain_mm``: sum of daily rainfall across survey days (mm)
+
+    These are X_effort features (frozen at median for SDM). See DEVELOPER_GUIDE §4.3.
+
+    Years not present in the weather file (e.g. 2025+) are silently skipped;
+    their cells will have NaN weather that ``make_effort_features`` fills with
+    column medians.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Weather parquet not found: {path}")
+
+    df = pd.read_parquet(path, columns=["year", "projection_x", "projection_y",
+                                        "tas_mean", "rainfall"])
+    df = df[df["year"].isin(years)]
+    if df.empty:
+        logger.warning("No weather data found for years %s in %s", years, path)
+        return pd.DataFrame(columns=["bng_ref", "year", "mean_temp_c", "total_rain_mm"])
+
+    # Assign bng_ref once per unique grid cell (the weather grid is already 1 km OSGB)
+    unique_cells = df[["projection_x", "projection_y"]].drop_duplicates().copy()
+    refs = []
+    for _, row in unique_cells.iterrows():
+        try:
+            refs.append(
+                xy_to_bng(
+                    float(row["projection_x"]),
+                    float(row["projection_y"]),
+                    resolution=BNG_RESOLUTION,
+                ).bng_ref_compact
+            )
+        except Exception:
+            refs.append(None)
+    unique_cells["bng_ref"] = refs
+    unique_cells = unique_cells.dropna(subset=["bng_ref"])
+
+    df = df.merge(unique_cells, on=["projection_x", "projection_y"], how="inner")
+
+    # Aggregate across survey days per (bng_ref, year)
+    agg = (
+        df.groupby(["bng_ref", "year"])
+        .agg(mean_temp_c=("tas_mean", "mean"), total_rain_mm=("rainfall", "sum"))
+        .reset_index()
+    )
+    logger.info(
+        "Loaded weather: %d (bng_ref, year) cells across %d years",
+        len(agg),
+        agg["year"].nunique(),
+    )
+    return agg
 
 
 # ── Assembly ────────────────────────────────────────────────────────────────
@@ -169,11 +234,18 @@ def assemble_analysis_data(cfg: RunConfig) -> pd.DataFrame:
     # 2. Load geospatial embeddings (single snapshot, time-invariant)
     embeddings = load_embeddings(cfg.embedding_year)
 
-    # 3. Join on bng_ref — inner join keeps only cells with both data
+    # 3. Join embeddings on bng_ref
     merged = surveys.merge(embeddings, left_on="bng_ref", right_index=True, how="inner")
+
+    # 4. Join survey-weekend weather on (bng_ref, year) — left join so cells
+    #    without coverage (e.g. years beyond the weather archive) keep NaN,
+    #    which make_effort_features fills with column medians.
+    weather = load_weather(cfg.years)
+    merged = merged.merge(weather, on=["bng_ref", "year"], how="left")
+
     logger.info(
-        "Assembled analysis data: %d rows (%d cells x %d years, after inner join "
-        "with embeddings)",
+        "Assembled analysis data: %d rows (%d cells x %d years, after joins "
+        "with embeddings and weather)",
         len(merged),
         merged["bng_ref"].nunique(),
         merged["year"].nunique(),

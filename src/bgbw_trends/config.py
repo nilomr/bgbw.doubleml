@@ -10,7 +10,8 @@ HARMONIZED_DIR = Path(
 BNG_SURVEYS_DIR = Path(
     "/home/nilomr/projects/bgbw.data.pipeline-r/output/data/bng_surveys"
 )
-GEOTESSERA_DIR = Path("/mnt/w/projects/BGBW/data/metadata/tmp_geotessera")
+AEF_DIR = Path("/mnt/w/projects/BGBW/data/metadata/spatial/aef")
+WEATHER_PATH = Path("/mnt/w/projects/BGBW/data/metadata/weather/bgbw_weather.parquet")
 
 # ── Species ─────────────────────────────────────────────────────────────────
 PROTOTYPE_SPECIES = ["blue_tit", "house_sparrow"]
@@ -127,10 +128,14 @@ HABITAT_FEATURES = [
 # grid-cell level so the propensity model can capture interannual confounding
 # in observer demographics and survey mode.
 EFFORT_FEATURES = [
-    "n_surveys",  # sampling intensity per cell-year
-    "mean_observers",  # mean total observers (adults + children) per survey
-    "proportion_adult",  # proportion of total observers who are adults
+    "n_surveys",          # sampling intensity per cell-year
+    "mean_observers",     # mean total observers (adults + children) per survey
+    "proportion_adult",   # proportion of total observers who are adults
     "proportion_online",  # proportion of surveys submitted online (vs paper)
+    # Survey-weekend weather — ambient detection conditions (X_effort only;
+    # frozen at median for SDM; NOT in W — see DEVELOPER_GUIDE §4.3)
+    "mean_temp_c",    # mean daily temperature across the survey weekend (°C)
+    "total_rain_mm",  # total rainfall across the survey weekend (mm)
 ]
 
 # All confounders for DML (X = X_hab + X_effort)
@@ -139,7 +144,7 @@ ALL_CONFOUNDER_COLUMNS = HABITAT_FEATURES + EFFORT_FEATURES
 # ── Spatial effect-modifier features (W) ────────────────────────────────────
 # Features that the trend τ(W) is allowed to vary across.
 # Spatial effect modifiers: spatial features + lat/lon, NOT effort variables.
-EMBEDDING_DIM = 128
+EMBEDDING_DIM = 64
 SPATIAL_FEATURES_W = [f"emb_{i}" for i in range(EMBEDDING_DIM)] + [
     "latitude",
     "longitude",
@@ -163,6 +168,8 @@ class ReferenceEffort:
     mean_observers: float = 1.3
     proportion_adult: float = 0.9
     proportion_online: float = 0.7
+    mean_temp_c: float = 4.3    # UK-median survey-weekend temperature (°C)
+    total_rain_mm: float = 2.1  # UK-median 3-day rainfall total (mm)
 
 
 @dataclass(frozen=True)
