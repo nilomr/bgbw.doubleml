@@ -10,7 +10,6 @@ from bgbw_trends.features.effort import make_effort_features, compute_reference_
 from bgbw_trends.features.response import (
     make_occurrence,
     make_log_count,
-    make_treatment,
 )
 
 __all__ = [
@@ -22,5 +21,4 @@ __all__ = [
     "compute_reference_effort",
     "make_occurrence",
     "make_log_count",
-    "make_treatment",
 ]

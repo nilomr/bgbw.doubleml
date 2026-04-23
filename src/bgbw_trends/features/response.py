@@ -27,11 +27,3 @@ def make_log_count(df: pd.DataFrame, species: str) -> pd.Series:
     return pd.Series(result, index=df.index, name=f"log_{species}")
 
 
-def make_treatment(df: pd.DataFrame, years: list[int]) -> pd.Series:
-    """Centre year around the midpoint of the study period.
-
-    T is continuous so τ is the per-year slope.
-    Do not one-hot encode years.
-    """
-    midpoint = np.mean(years)
-    return (df["year"] - midpoint).astype(np.float64).rename("T")
