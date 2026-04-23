@@ -670,12 +670,12 @@ def plot_trend(
         subtitle=f"{metric_names.get(metric, metric)} across 1 km grid cells",
     )
 
-    mean_tau = float(np.nanmean(tau_pct))
+    median_tau = float(np.nanmedian(tau_pct))
     n_sig = int(sig_mask.sum())
     pct_sig = 100.0 * n_sig / max(len(sig_mask), 1)
     _footer_block(
         footer_ax,
-        f"Grid mean {mean_tau:+.2f}% yr⁻¹  •  detectable change in {pct_sig:.0f}% of cells",
+        f"Grid median {median_tau:+.2f}% yr⁻¹  •  detectable change in {pct_sig:.0f}% of cells",
     )
 
     if output_path:
@@ -784,11 +784,11 @@ def plot_sdm(
         subtitle="Effort-adjusted species distribution model",
     )
 
-    mean_occ = float(np.nanmean(occ))
-    mean_abd = float(np.nanmean(abd))
+    median_occ = float(np.nanmedian(occ))
+    median_abd = float(np.nanmedian(abd))
     _footer_block(
         footer_ax,
-        f"Mean P(occ) {mean_occ:.3f}  •  Mean E[abundance] {mean_abd:.2f}",
+        f"Median P(occ) {median_occ:.3f}  •  Median E[abundance] {median_abd:.2f}",
     )
 
     if output_path:
@@ -935,12 +935,12 @@ def plot_bivariate(
         subtitle=f"{metric_long.get(metric, metric)} × Trend bivariate map",
     )
 
-    mean_tau = float(np.nanmean(tau * 100.0))
-    mean_abd = float(np.nanmean(abd))
+    median_tau = float(np.nanmedian(tau * 100.0))
+    median_abd = float(np.nanmedian(abd))
     _footer_block(
         footer_ax,
-        f"Mean {metric_names.get(metric, metric)} {mean_abd:.2f}  •  "
-        f"Grid mean trend {mean_tau:+.2f}% yr⁻¹",
+        f"Median {metric_names.get(metric, metric)} {median_abd:.2f}  •  "
+        f"Grid median trend {median_tau:+.2f}% yr⁻¹",
     )
 
     if output_path:

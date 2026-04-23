@@ -368,7 +368,7 @@ def plot_sdm_prediction_maps(
     emax = float(np.nanquantile(e_abund, 0.99)) if len(e_abund) else 1.0
     raster_abund, _ = to_raster(east, north, e_abund)
 
-    fig, axes = plt.subplots(1, 2, figsize=(13.2, 7.0), facecolor=style.PAPER)
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 7.0), facecolor=style.PAPER)
 
     # Occurrence — scale to data range so spatial variation is visible
     occ_lo = float(np.nanpercentile(occ, 1))
@@ -418,7 +418,7 @@ def plot_sdm_prediction_maps(
     _header_block(fig, species_label, "Effort-adjusted species distribution model")
     _footer_note(
         fig,
-        f"Mean P(occ) {np.nanmean(occ):.3f}  •  Mean E[abundance] {np.nanmean(e_abund):.2f}",
+        f"Median P(occ) {np.nanmedian(occ):.3f}  •  Median E[abundance] {np.nanmedian(e_abund):.2f}",
     )
     fig.tight_layout(rect=[0.02, 0.08, 0.98, 0.88])
 
@@ -734,14 +734,14 @@ def _plot_distribution_panel(
         ax.set_xscale("log")
         zero_share = 100.0 * (clean <= 0.0).mean()
         note = (
-            f"mean {clean.mean():.3f}  •  median {np.median(clean):.3f}"
+            f"median {np.median(clean):.3f}"
             f"  •  zero cells {zero_share:.1f}%"
         )
     else:
         lo, hi = np.nanpercentile(clean, [0.5, 99.5])
         hist_values = clean[(clean >= lo) & (clean <= hi)]
         ax.hist(hist_values, bins=55, color=color, alpha=0.78)
-        note = f"mean {clean.mean():.2f}  •  median {np.median(clean):.2f}"
+        note = f"median {np.median(clean):.2f}"
 
     _panel_chip(ax, title)
     ax.set_xlabel(xlabel, **style.FONT_LABEL)
@@ -820,9 +820,9 @@ def plot_prediction_distribution_summary(
             histtype="step",
             linewidth=1.9,
             color=color,
-            label=f"{label} mean {values.mean():+.2f}%/yr",
+            label=f"{label} median {np.median(values):+.2f}%/yr",
         )
-        ax_trend.axvline(values.mean(), color=color, linewidth=1.0, alpha=0.85)
+        ax_trend.axvline(np.median(values), color=color, linewidth=1.0, alpha=0.85)
     ax_trend.set_xlabel("Trend (%/yr)", **style.FONT_LABEL)
     ax_trend.set_ylabel("Density", **style.FONT_LABEL)
     ax_trend.legend(
@@ -842,11 +842,11 @@ def plot_prediction_distribution_summary(
 
     summary_lines = [
         f"Grid cells  {len(np.asarray(prediction.bng_ref)):,}",
-        f"Mean P(occ)  {p_occ.mean():.3f}",
-        f"Mean E[abundance]  {e_abundance.mean():.2f}",
-        f"Occurrence trend  {occ_ppy.mean():+.2f}%/yr",
-        f"Count trend  {count_ppy.mean():+.2f}%/yr",
-        f"Abundance trend  {abd_ppy.mean():+.2f}%/yr",
+        f"Median P(occ)  {np.nanmedian(p_occ):.3f}",
+        f"Median E[abundance]  {np.nanmedian(e_abundance):.2f}",
+        f"Occurrence trend  {np.nanmedian(occ_ppy):+.2f}%/yr",
+        f"Count trend  {np.nanmedian(count_ppy):+.2f}%/yr",
+        f"Abundance trend  {np.nanmedian(abd_ppy):+.2f}%/yr",
     ]
     if np.asarray(getattr(prediction, "occ_sigma", np.array([]))).size:
         occ_sigma_finite = (
@@ -881,7 +881,7 @@ def plot_prediction_distribution_summary(
     compare_ax.set_ylabel("")
 
     rows: list[tuple[str, float, float | None, float | None, str, str]] = [
-        ("Pipeline abundance", float(abd_ppy.mean()), None, None, "o", "#5A7F62")
+        ("Pipeline abundance", float(np.nanmedian(abd_ppy)), None, None, "o", "#5A7F62")
     ]
     if ensemble is not None:
         ens_abd = _finite_values(getattr(ensemble, "abd_ppy"), scale=100.0)
@@ -891,9 +891,9 @@ def plot_prediction_distribution_summary(
             rows.append(
                 (
                     "Ensemble abundance",
-                    float(ens_abd.mean()),
-                    float(ens_lo.mean()),
-                    float(ens_hi.mean()),
+                    float(np.nanmedian(ens_abd)),
+                    float(np.nanmedian(ens_lo)),
+                    float(np.nanmedian(ens_hi)),
                     "s",
                     "#6E5E9C",
                 )
@@ -928,9 +928,9 @@ def plot_prediction_distribution_summary(
     _header_block(fig, species_label, subtitle)
 
     footer = (
-        f"Occurrence trend {occ_ppy.mean():+.2f}%/yr  •  "
-        f"Count trend {count_ppy.mean():+.2f}%/yr  •  "
-        f"Abundance trend {abd_ppy.mean():+.2f}%/yr"
+        f"Occurrence trend {np.nanmedian(occ_ppy):+.2f}%/yr  •  "
+        f"Count trend {np.nanmedian(count_ppy):+.2f}%/yr  •  "
+        f"Abundance trend {np.nanmedian(abd_ppy):+.2f}%/yr"
     )
     _footer_note(fig, footer)
     fig.tight_layout(rect=[0.02, 0.06, 0.98, 0.88])

@@ -153,16 +153,33 @@ def print_trend_table(
     console.print(table)
 
 
-def print_sdm_table(rows: Sequence[tuple], title: str = "SDM diagnostics") -> None:
-    """Print SDM model diagnostic metrics."""
+def print_sdm_table(rows: Sequence[tuple], title: str = "Pipeline RF diagnostics") -> None:
+    """Print pipeline RF diagnostic metrics.
+
+    Each row: (species, role, metric, value).  ``role`` should be one of the
+    DML stage labels ("marginal", "propensity").  Propensity R² values are
+    colour-coded: dim = low confounding (DML buying little), yellow = moderate,
+    red = very high (check for year-proxy features in X).
+    """
     table = Table(title=title, show_header=True, header_style="bold dim")
     table.add_column("Species", no_wrap=True)
-    table.add_column("Model", style="dim")
+    table.add_column("Forest", style="dim")
     table.add_column("Metric", justify="right", style="cyan")
     table.add_column("Value", justify="right")
 
-    for sp, model_name, metric, value in rows:
-        table.add_row(sp, model_name, metric, f"{value:.4f}")
+    for sp, role, metric, value in rows:
+        is_propensity_r2 = "propensity" in role and metric == "R²"
+        if is_propensity_r2:
+            if value > 0.85:
+                style = "bold red"
+            elif value > 0.4:
+                style = "yellow"
+            else:
+                style = "dim"
+            val_text = Text(f"{value:.4f}", style=style)
+        else:
+            val_text = Text(f"{value:.4f}")
+        table.add_row(sp, role, metric, val_text)
 
     console.print(table)
 

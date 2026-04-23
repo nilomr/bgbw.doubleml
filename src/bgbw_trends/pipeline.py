@@ -577,14 +577,14 @@ def train_predict_species(
     abd_ppy = np.where(np.isfinite(abd_ppy), abd_ppy, np.nan)
 
     logger.info(
-        "train_predict_species[%s]: mean P(occ)=%.3f E[count|occ]=%.2f "
+        "train_predict_species[%s]: median P(occ)=%.3f E[count|occ]=%.2f "
         "occ_ppy=%+.3f%% count_ppy=%+.3f%% abd_ppy=%+.3f%%",
         species,
-        float(np.nanmean(p_occ)),
-        float(np.nanmean(e_count)),
-        float(np.nanmean(occ_ppy)) * 100,
-        float(np.nanmean(count_ppy)) * 100,
-        float(np.nanmean(abd_ppy)) * 100,
+        float(np.nanmedian(p_occ)),
+        float(np.nanmedian(e_count)),
+        float(np.nanmedian(occ_ppy)) * 100,
+        float(np.nanmedian(count_ppy)) * 100,
+        float(np.nanmedian(abd_ppy)) * 100,
     )
 
     prediction = SpeciesPrediction(

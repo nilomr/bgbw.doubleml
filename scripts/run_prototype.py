@@ -100,13 +100,13 @@ def main() -> None:
     run_ensemble = True  # slow — set True for uncertainty quantification
 
     cfg = RunConfig(
-        species=["house_sparrow"],
+        species=["nuthatch"],
         years=[2005, 2015, 2025],
         embedding_year=2019,
         output_dir=Path("output/prototype"),
         n_folds=3,
         n_rep=3,
-        n_pca_components=4,
+        n_pca_components=5,
         n_estimators=300,
         cf_n_estimators=500,
         cf_min_samples_leaf=50,
@@ -158,10 +158,10 @@ def main() -> None:
     )
 
     # ── Two-part DML trend + SDM (Fink §3.2) ────────────────────────────
-    # Johnston §3.4: draw two independent year-stratified subsamples of
-    # the aggregated cell-year rows so the occurrence and count halves of
-    # the hurdle see non-overlapping bootstraps — keeps the chain-rule
-    # sum abd_ppy = occ_ppy + count_ppy unbiased.
+    # Quick prototype only — NOT the correct ensemble path (see ensemble.py).
+    # Two independent 75% draws of already-aggregated cell-year rows overlap
+    # ~56% by construction; within shared cells the statistics are identical,
+    # so hurdle independence is nominal. Use fit_ensemble_trend for inference.
     section("Two-part DML trend + SDM")
     console.print()
     predictions = {}
@@ -189,9 +189,9 @@ def main() -> None:
     for sp, pred in predictions.items():
         console.print(
             f"  [dim]{sp}:[/dim]"
-            f"  mean P(occur)=[cyan]{np.nanmean(pred.p_occurrence):.3f}[/cyan]"
-            f"  mean E[abund]=[cyan]{np.nanmean(pred.e_abundance):.3f}[/cyan]"
-            f"  abd_ppy=[cyan]{np.nanmean(pred.abd_ppy) * 100:+.2f}%[/cyan]"
+            f"  median P(occur)=[cyan]{np.nanmedian(pred.p_occurrence):.3f}[/cyan]"
+            f"  median E[abund]=[cyan]{np.nanmedian(pred.e_abundance):.3f}[/cyan]"
+            f"  abd_ppy=[cyan]{np.nanmedian(pred.abd_ppy) * 100:+.2f}%[/cyan]"
         )
 
     sdm_rows = []
@@ -200,16 +200,17 @@ def main() -> None:
         diag = pred.diagnostics
         sdm_rows.extend(
             [
-                (sp, "occurrence RF", "Brier", diag.occurrence_brier),
-                (sp, "occurrence RF", "ROC AUC", diag.occurrence_auc),
-                (sp, "occurrence RF", "PR AUC", diag.occurrence_pr_auc),
-                (sp, "count RF", "R2 log1p", diag.count_r2),
-                (sp, "count RF", "RMSE log1p", diag.count_rmse),
-                (sp, "count RF", "MAE log1p", diag.count_mae),
-                (sp, "year RF (occ)", "R2", diag.propensity_occ_r2),
-                (sp, "year RF (occ)", "RMSE", diag.propensity_occ_rmse),
-                (sp, "year RF (count)", "R2", diag.propensity_count_r2),
-                (sp, "year RF (count)", "RMSE", diag.propensity_count_rmse),
+                # marginal m̂(X): predicts Y from X, OOB preds become Y.hat
+                (sp, "marginal · occurrence",   "Brier",    diag.occurrence_brier),
+                (sp, "marginal · occurrence",   "ROC AUC",  diag.occurrence_auc),
+                (sp, "marginal · occurrence",   "PR AUC",   diag.occurrence_pr_auc),
+                (sp, "marginal · count | occ",  "R²",       diag.count_r2),
+                (sp, "marginal · count | occ",  "RMSE",     diag.count_rmse),
+                # propensity ŝ(X): predicts year from X, OOB preds become T.hat
+                # High R² = strong temporal confounding; DML is doing real work.
+                # R² > 0.85 may indicate a year-proxy feature leaking into X.
+                (sp, "propensity · occurrence", "R²",       diag.propensity_occ_r2),
+                (sp, "propensity · count | occ","R²",       diag.propensity_count_r2),
             ]
         )
         diagnostics_rows.append(
