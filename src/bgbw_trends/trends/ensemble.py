@@ -1,10 +1,11 @@
 """Grid-level ensemble of the two-part DML trend (Johnston 2025, §3.4).
 
-For each ensemble member we draw two *independent* 75% subsamples of the
-harmonized surveys (stratified by year) — one for the occurrence stage,
-one for the count stage — and run ``train_predict_species`` on the pair.
-The two halves of the hurdle model stay genuinely independent, so the
-chain-rule sum ``occ_ppy + count_ppy`` is unbiased (Fink §3.2).
+For each ensemble member the prepared surveys are split 50/50 (stratified
+by year) into non-overlapping halves — one for the occurrence stage, one
+for the count stage. Each half is independently aggregated to 1 km cells
+before being passed to ``train_predict_species``, so the two hurdle stages
+see genuinely different cell-level statistics and the chain-rule sum
+``occ_ppy + count_ppy`` is unbiased (Fink §3.2).
 
 Grid-cell point estimates are medians across members; 80% CIs use the
 10th/90th percentiles (Fink §3.3 Step 5).
@@ -55,18 +56,26 @@ class EnsembleTrendResult:
     subsample_fraction: float
 
 
-def _subsample_prepared(
+def _split_prepared(
     prepared: pd.DataFrame,
-    fraction: float,
     rng: np.random.Generator,
-) -> pd.DataFrame:
-    """Sample ``fraction`` of prepared (BNG-assigned) surveys, stratified by year."""
-    frames = []
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split prepared surveys 50/50, stratified by year, with zero overlap.
+
+    Surveys are shuffled within each year then divided at the midpoint, so
+    the occurrence and count halves are mutually exclusive. Each half is
+    subsequently aggregated independently, giving each hurdle stage different
+    cell-level statistics even for cells that would otherwise share surveys.
+    """
+    occ_frames, count_frames = [], []
     for _year, group in prepared.groupby("year"):
-        n_sample = max(1, int(len(group) * fraction))
-        idx = rng.choice(group.index, size=n_sample, replace=False)
-        frames.append(group.loc[idx])
-    return pd.concat(frames, ignore_index=True)
+        idx = rng.permutation(group.index)
+        mid = len(idx) // 2
+        occ_frames.append(group.loc[idx[:mid]])
+        count_frames.append(group.loc[idx[mid:]])
+    occ = pd.concat(occ_frames, ignore_index=True)
+    count = pd.concat(count_frames, ignore_index=True)
+    return occ, count
 
 
 def _aggregate_and_merge(
@@ -90,7 +99,6 @@ def fit_ensemble_trend(
     grid: pd.DataFrame,
     reference_effort: ReferenceEffort | None = None,
     n_ensemble: int = 25,
-    subsample_fraction: float = 0.75,
     pca_model: dict | None = None,
     seed: int = 42,
 ) -> EnsembleTrendResult:
@@ -114,8 +122,6 @@ def fit_ensemble_trend(
         the first successful ensemble subsample's aggregation.
     n_ensemble
         Number of ensemble members.
-    subsample_fraction
-        Fraction of surveys per subsample.
     pca_model
         Fitted embedding PCA (as returned by ``reduce_embeddings_pca``). If
         ``None`` and ``cfg.n_pca_components`` is set, a PCA is fit on the
@@ -145,8 +151,7 @@ def fit_ensemble_trend(
     for i in range(n_ensemble):
         logger.info("Ensemble member %d/%d", i + 1, n_ensemble)
         try:
-            occ_prep = _subsample_prepared(prepared, subsample_fraction, rng)
-            count_prep = _subsample_prepared(prepared, subsample_fraction, rng)
+            occ_prep, count_prep = _split_prepared(prepared, rng)
 
             # Fit PCA on first successful member's aggregated occ frame if
             # not supplied; reuse for count so both halves share feature
@@ -198,13 +203,13 @@ def fit_ensemble_trend(
     e_abund_arr = np.vstack(e_abund_stack)
 
     logger.info(
-        "Ensemble complete: %d/%d members. grid-mean abd_ppy=%+.3f%% "
+        "Ensemble complete: %d/%d members. grid-median abd_ppy=%+.3f%% "
         "(10th/90th: %+.3f%%, %+.3f%%)",
         n_ok,
         n_ensemble,
-        float(np.nanmean(np.nanmedian(abd_arr, axis=0))) * 100,
-        float(np.nanmean(np.nanpercentile(abd_arr, 10, axis=0))) * 100,
-        float(np.nanmean(np.nanpercentile(abd_arr, 90, axis=0))) * 100,
+        float(np.nanmedian(np.nanmedian(abd_arr, axis=0))) * 100,
+        float(np.nanmedian(np.nanpercentile(abd_arr, 10, axis=0))) * 100,
+        float(np.nanmedian(np.nanpercentile(abd_arr, 90, axis=0))) * 100,
     )
 
     return EnsembleTrendResult(
@@ -220,5 +225,5 @@ def fit_ensemble_trend(
         abd_ppy_draws=abd_arr,
         n_ensemble=n_ensemble,
         n_successful=n_ok,
-        subsample_fraction=subsample_fraction,
+        subsample_fraction=0.5,
     )
