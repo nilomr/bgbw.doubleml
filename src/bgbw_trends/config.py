@@ -12,6 +12,9 @@ BNG_SURVEYS_DIR = Path(
 )
 AEF_DIR = Path("/mnt/w/projects/BGBW/data/metadata/spatial/aef")
 WEATHER_PATH = Path("/mnt/w/projects/BGBW/data/metadata/weather/bgbw_weather.parquet")
+JANUARY_WEATHER_PATH = Path(
+    "/mnt/w/projects/BGBW/data/metadata/weather/bgbw_january_weather.parquet"
+)
 
 # ── Species ─────────────────────────────────────────────────────────────────
 PROTOTYPE_SPECIES = ["blue_tit", "house_sparrow"]
@@ -132,10 +135,16 @@ EFFORT_FEATURES = [
     "mean_observers",     # mean total observers (adults + children) per survey
     "proportion_adult",   # proportion of total observers who are adults
     "proportion_online",  # proportion of surveys submitted online (vs paper)
-    # Survey-weekend weather — ambient detection conditions (X_effort only;
-    # frozen at median for SDM; NOT in W — see DEVELOPER_GUIDE §4.3)
+    # Survey-weekend weather — ambient detection conditions on the day.
+    # X_effort only; frozen at median for SDM; NOT in W (see DEVELOPER_GUIDE §4.3).
     "mean_temp_c",    # mean daily temperature across the survey weekend (°C)
     "total_rain_mm",  # total rainfall across the survey weekend (mm)
+    # Pre-survey January weather — accumulated winter conditions before the weekend.
+    # Captures year-level confounding: cold/wet Januaries depress bird activity
+    # and observer motivation independently of conditions on the survey weekend.
+    # X_effort only; frozen at median for SDM; NOT in W (see DEVELOPER_GUIDE §4.3).
+    "jan_mean_temp_c",    # mean daily temperature over non-survey January days (°C)
+    "jan_total_rain_mm",  # cumulative rainfall over non-survey January days (mm)
 ]
 
 # All confounders for DML (X = X_hab + X_effort)
@@ -170,6 +179,8 @@ class ReferenceEffort:
     proportion_online: float = 0.7
     mean_temp_c: float = 4.3    # UK-median survey-weekend temperature (°C)
     total_rain_mm: float = 2.1  # UK-median 3-day rainfall total (mm)
+    jan_mean_temp_c: float = 4.0    # UK-median January mean temperature (°C)
+    jan_total_rain_mm: float = 85.0  # UK-median cumulative January rainfall (mm)
 
 
 @dataclass(frozen=True)

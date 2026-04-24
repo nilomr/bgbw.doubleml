@@ -20,6 +20,7 @@ from bgbw_trends.config import (
     AEF_DIR,
     BNG_SURVEYS_DIR,
     HARMONIZED_DIR,
+    JANUARY_WEATHER_PATH,
     WEATHER_PATH,
     RunConfig,
 )
@@ -185,6 +186,81 @@ def load_weather(
     return agg
 
 
+def load_january_weather(
+    years: list[int],
+    path: Path = JANUARY_WEATHER_PATH,
+) -> pd.DataFrame:
+    """Load pre-survey January weather and aggregate to 1 km BNG cells.
+
+    Reads the parquet produced by
+    ``sources/weather/summarise_january_weather.py``, converts OSGB coordinates
+    to BNG refs, and returns one row per (bng_ref, year) with two
+    effort-adjacent summaries covering non-survey January days:
+
+    - ``jan_mean_temp_c``   : mean daily temperature (°C)
+    - ``jan_total_rain_mm`` : cumulative rainfall (mm)
+
+    Cold or wet Januaries depress garden bird activity and observer motivation
+    independently of conditions on the survey weekend itself.  These are
+    X_effort features (frozen at median for SDM, NOT in W).
+    See DEVELOPER_GUIDE §4.3.
+
+    Years not present in the parquet (e.g. 2025+) are silently skipped;
+    their cells will have NaN that ``make_effort_features`` fills with column
+    medians at model-fitting time.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"January-weather parquet not found: {path}")
+
+    df = pd.read_parquet(
+        path,
+        columns=["year", "projection_x", "projection_y",
+                 "jan_mean_temp", "jan_total_rain"],
+    )
+    df = df[df["year"].isin(years)]
+    if df.empty:
+        logger.warning(
+            "No January-weather data found for years %s in %s", years, path
+        )
+        return pd.DataFrame(
+            columns=["bng_ref", "year", "jan_mean_temp_c", "jan_total_rain_mm"]
+        )
+
+    # Assign bng_ref once per unique grid cell (already 1 km OSGB)
+    unique_cells = df[["projection_x", "projection_y"]].drop_duplicates().copy()
+    refs = []
+    for _, row in unique_cells.iterrows():
+        try:
+            refs.append(
+                xy_to_bng(
+                    float(row["projection_x"]),
+                    float(row["projection_y"]),
+                    resolution=BNG_RESOLUTION,
+                ).bng_ref_compact
+            )
+        except Exception:
+            refs.append(None)
+    unique_cells["bng_ref"] = refs
+    unique_cells = unique_cells.dropna(subset=["bng_ref"])
+
+    df = df.merge(unique_cells, on=["projection_x", "projection_y"], how="inner")
+
+    result = (
+        df[["bng_ref", "year", "jan_mean_temp", "jan_total_rain"]]
+        .rename(columns={
+            "jan_mean_temp":  "jan_mean_temp_c",
+            "jan_total_rain": "jan_total_rain_mm",
+        })
+        .reset_index(drop=True)
+    )
+    logger.info(
+        "Loaded January weather: %d (bng_ref, year) cells across %d years",
+        len(result),
+        result["year"].nunique(),
+    )
+    return result
+
+
 # ── Assembly ────────────────────────────────────────────────────────────────
 
 
@@ -216,6 +292,8 @@ def assemble_analysis_data(cfg: RunConfig) -> pd.DataFrame:
     - one column per species (mean count across surveys in that cell-year)
     - emb_0 ... emb_{d-1}  (geospatial embedding of the 1 km cell)
     - n_pixels  (number of satellite pixels in the cell)
+    - mean_temp_c, total_rain_mm  (survey-weekend weather, X_effort)
+    - jan_mean_temp_c, jan_total_rain_mm  (January pre-survey weather, X_effort)
 
     Parameters
     ----------
@@ -242,6 +320,10 @@ def assemble_analysis_data(cfg: RunConfig) -> pd.DataFrame:
     #    which make_effort_features fills with column medians.
     weather = load_weather(cfg.years)
     merged = merged.merge(weather, on=["bng_ref", "year"], how="left")
+
+    # 5. Join pre-survey January weather — same left-join convention.
+    jan_weather = load_january_weather(cfg.years)
+    merged = merged.merge(jan_weather, on=["bng_ref", "year"], how="left")
 
     logger.info(
         "Assembled analysis data: %d rows (%d cells x %d years, after joins "
