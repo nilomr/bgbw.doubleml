@@ -788,9 +788,9 @@ def export_hex_rasters(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    layers: list[tuple[gpd.GeoDataFrame, str, mc.Normalize | None, mc.Colormap | None]] = [
-        (hex_abd, "abundance", abd_norm, abd_cmap)
-    ]
+    layers: list[
+        tuple[gpd.GeoDataFrame, str, mc.Normalize | None, mc.Colormap | None]
+    ] = [(hex_abd, "abundance", abd_norm, abd_cmap)]
     if hex_trend is not None:
         layers.append((hex_trend, "trend", trend_norm, trend_cmap))
 
@@ -806,7 +806,9 @@ def export_hex_rasters(
 
         width = int(round((maxx - minx) / resolution))
         height = int(round((maxy - miny) / resolution))
-        transform = rasterio.transform.from_bounds(minx, miny, maxx, maxy, width, height)
+        transform = rasterio.transform.from_bounds(
+            minx, miny, maxx, maxy, width, height
+        )
 
         shapes = (
             (geom, float(val))
@@ -971,18 +973,20 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "hex_abundance.png"
         logger.info("[%s] hex map → %s", sp, out_path)
-        _fig, hex_abd, hex_trend, abd_norm, abd_cmap, tau_norm, tau_cmap = plot_hex_abundance(
-            df,
-            title=sp,
-            species_label=label,
-            hex_size=args.hex_size,
-            min_cells=args.min_cells,
-            gamma=args.gamma,
-            pct_vmax=args.pct_vmax,
-            output_path=out_path,
-            mask=mask_path,
-            mask_crs=args.mask_crs,
-            dpi=args.dpi,
+        _fig, hex_abd, hex_trend, abd_norm, abd_cmap, tau_norm, tau_cmap = (
+            plot_hex_abundance(
+                df,
+                title=sp,
+                species_label=label,
+                hex_size=args.hex_size,
+                min_cells=args.min_cells,
+                gamma=args.gamma,
+                pct_vmax=args.pct_vmax,
+                output_path=out_path,
+                mask=mask_path,
+                mask_crs=args.mask_crs,
+                dpi=args.dpi,
+            )
         )
         if not args.no_raster:
             _mp = Path(mask_path)
@@ -1004,7 +1008,9 @@ def main() -> None:
                 abd_cmap=abd_cmap,
                 trend_norm=tau_norm,
                 trend_cmap=tau_cmap,
-                raster_mask_path=_mp if _mp.suffix.lower() in _RASTER_SUFFIXES else None,
+                raster_mask_path=_mp
+                if _mp.suffix.lower() in _RASTER_SUFFIXES
+                else None,
                 mask_crs=args.mask_crs,
             )
 
