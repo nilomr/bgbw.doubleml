@@ -1021,7 +1021,9 @@ def plot_prediction_distribution_summary(
     compare_ax.set_xlabel("Abundance trend (%/yr)", **style.FONT_LABEL)
 
     species_label = prediction.species.replace("_", " ").title()
-    subtitle = "Occurrence and abundance distributions, trend components, and run statistics"
+    subtitle = (
+        "Occurrence and abundance distributions, trend components, and run statistics"
+    )
     if ensemble is not None:
         subtitle = "Occurrence and abundance distributions, trend components, and ensemble uncertainty"
     _header_block(fig, species_label, subtitle)
