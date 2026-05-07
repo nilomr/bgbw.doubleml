@@ -199,6 +199,10 @@ class TrainedSpeciesModels:
     W_occ: np.ndarray
     W_count: np.ndarray
     W_feature_names: list[str]
+    # Precomputed training-time CATE predictions — reused by the SHAP
+    # surrogate so we avoid a second cf.predict call and get full-N coverage.
+    tau_occ: np.ndarray
+    tau_count: np.ndarray
 
 
 @dataclass
@@ -449,9 +453,7 @@ def train_predict_species(
         X_prop_count = _assemble_X(dc, propensity_covariates)
     W_count = _assemble_W(dc, treatment_covariates)
 
-    y_count_forest, Y_count_hat = _fit_nuisance(
-        X_marg_count, Y_log, cfg, seed=seed + 2
-    )
+    y_count_forest, Y_count_hat = _fit_nuisance(X_marg_count, Y_log, cfg, seed=seed + 2)
     _, W_count_hat = _fit_nuisance(X_prop_count, T_count, cfg, seed=seed + 3)
 
     diagnostics = SpeciesModelDiagnostics(
@@ -618,6 +620,8 @@ def train_predict_species(
             W_occ=W_occ,
             W_count=W_count,
             W_feature_names=W_names,
+            tau_occ=tau_occ_train,
+            tau_count=tau_count_train,
         )
         return prediction, models
     return prediction

@@ -104,11 +104,12 @@ def _draw_land_and_coast(
 def _panel_chip(ax: plt.Axes, text: str) -> None:
     ax.text(
         0.02,
-        0.98,
+        1.01,
         text,
         transform=ax.transAxes,
-        va="top",
+        va="bottom",
         ha="left",
+        clip_on=False,
         bbox={
             "boxstyle": "round,pad=0.22,rounding_size=0.14",
             "facecolor": style.PAPER,
@@ -191,7 +192,7 @@ def plot_trend_ppy_panels(
 
     This figure intentionally omits the old significant-only panels and shows
     all three trend components side by side using the map style from
-    ``scripts/make_maps.py`` via ``bgbw_trends.viz.style`` tokens.
+    ``scripts/pipeline/make_maps.py`` via ``bgbw_trends.viz.style`` tokens.
     """
     style.apply()
     uk = _load_uk(Path(uk_shp))
@@ -519,18 +520,40 @@ def plot_yearly_trend(
 ) -> plt.Figure:
     """Raw vs deconfounded model trend, one panel per stage.
 
-    For each stage (occurrence, count) we plot:
+    The DML model's goal is to isolate the *pure time effect* on species
+    abundance — the part of year-to-year change that cannot be explained by
+    changes in survey effort, weather, or habitat covariates (X).
 
-    - **Raw** (blue): observed yearly mean of Y with SE bars. Confounded —
-      this is what the data shows before any adjustment.
-    - **Conditional mean** (grey, dashed): yearly mean of ``m̂(X_i)`` for
-      observations in year y. Captures how the *confounders* drift year to
-      year; the gap between raw and this line is the year effect *not*
-      explained by X (approximately).
+    The three series relate via the identity (Fink 2023, motivating example):
+
+        raw slope ≈ slope of grey + ATE (orange slope)
+
+    so the **slope of the grey line is the confounding component** — the
+    year-to-year drift in raw Y that is due to the X covariates changing over
+    time rather than true species change.
+
+    - **Raw mean** (blue): the observed yearly mean of Y (P(occurrence) or
+      log1p count).  Confounded — mixes genuine trend with any drift in who
+      surveys, when, and where.
+
+    - **Conditional mean m̂(X)** (grey dashed): the yearly mean of
+      m̂(Xᵢ) — the marginal forest's fitted values, which depend on X only
+      (never on year).  Because X covariates (effort, weather, habitat) shift
+      in composition from year to year, this series drifts even though year
+      is absent from m̂.  Its slope equals the portion of the raw trend that
+      DML attributes to X-composition change.  If grey and blue have the same
+      slope, X explains *all* of the apparent trend → ATE ≈ 0 (large
+      adjustment).  If grey is flat while blue trends, X doesn't change with
+      year → ATE ≈ raw slope (small or no adjustment).
+
     - **Deconfounded trend** (orange): ``Ȳ + ATE·(y − T̄)`` where
-      ``ATE = mean τ̂(W)``. The model's answer to "what is the trend after
-      partialling out X?" — direct analogue of the true-trend line in
-      motivating-example.Rmd fig1a.
+      ``ATE = mean τ̂(W)``.  A straight line through the grand mean with slope
+      equal to the causal-forest estimate — the residual year effect after
+      partialling out m̂(X).  Direct analogue of the known-truth orange line in
+      Fink's motivating-example fig1a.
+
+    Each panel carries a slope annotation: raw OLS slope, ATE, and their
+    difference (the deconfounding adjustment = slope of grey).
 
     Occurrence is on the probability scale; count is on log1p.
     """
@@ -544,11 +567,18 @@ def plot_yearly_trend(
     summary_count = _yearly_trend_summary(prediction.obs_count, prediction.ate_count)
 
     style.apply()
-    fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.6), facecolor=style.PAPER)
-    panels = [
-        (axes[0], summary_occ, prediction.ate_occ, "Occurrence", "P(occurrence)", True),
+    fig, axes = plt.subplots(2, 2, figsize=(13.0, 10.0), facecolor=style.PAPER)
+    level_panels = [
         (
-            axes[1],
+            axes[0, 0],
+            summary_occ,
+            prediction.ate_occ,
+            "Occurrence",
+            "P(occurrence)",
+            True,
+        ),
+        (
+            axes[0, 1],
             summary_count,
             prediction.ate_count,
             "Count (log1p)",
@@ -556,11 +586,28 @@ def plot_yearly_trend(
             False,
         ),
     ]
+    diff_panels = [
+        (
+            axes[1, 0],
+            summary_occ,
+            prediction.ate_occ,
+            "Occurrence — year-on-year Δ",
+            "ΔP(occurrence)",
+        ),
+        (
+            axes[1, 1],
+            summary_count,
+            prediction.ate_count,
+            "Count — year-on-year Δ",
+            "Δlog(1 + count)",
+        ),
+    ]
     _RAW = "#2C6E91"
     _TREND = "#C5672F"
     _COND = "#B5AFA8"
 
-    for ax, s, ate, title, ylabel, is_binary in panels:
+    # ── Top row: levels ──────────────────────────────────────────────────
+    for ax, s, ate, title, ylabel, is_binary in level_panels:
         _style_series_axis(ax)
         years = s["year"].to_numpy()
 
@@ -573,7 +620,6 @@ def plot_yearly_trend(
             alpha=0.13,
             zorder=2,
         )
-        # Raw mean line
         ax.plot(
             years,
             s["raw_mean"],
@@ -585,7 +631,6 @@ def plot_yearly_trend(
             label="Raw mean ± SE",
             zorder=3,
         )
-        # Conditional mean (confounder drift)
         ax.plot(
             years,
             s["cond_mean"],
@@ -596,7 +641,6 @@ def plot_yearly_trend(
             label="Conditional mean m̂(X)",
             zorder=2,
         )
-        # Deconfounded trend
         ax.plot(
             years,
             s["deconf"],
@@ -607,7 +651,6 @@ def plot_yearly_trend(
             zorder=4,
         )
 
-        # Auto-scale y-axis to data range
         all_vals = np.concatenate(
             [
                 s["raw_mean"] - s["raw_se"],
@@ -620,22 +663,79 @@ def plot_yearly_trend(
         if finite.size:
             ylo, yhi = float(finite.min()), float(finite.max())
             pad = max((yhi - ylo) * 0.10, 1e-3)
-            ax.set_ylim(
-                max(0.0, ylo - pad) if is_binary else ylo - pad,
-                yhi + pad,
-            )
+            ax.set_ylim(max(0.0, ylo - pad) if is_binary else ylo - pad, yhi + pad)
 
         ax.set_xlabel("Year", **style.FONT_LABEL)
         ax.set_ylabel(ylabel, **style.FONT_LABEL)
         tick_years = years[::2] if len(years) > 8 else years
         ax.set_xticks(tick_years)
-        ax.tick_params(axis="x", rotation=30)
         _panel_chip(ax, title)
         ax.legend(
-            loc="upper right",
-            frameon=False,
-            fontsize=8.2,
-            labelcolor=style.TEXT_MUTED,
+            loc="upper right", frameon=False, fontsize=8.2, labelcolor=style.TEXT_MUTED
+        )
+
+    # ── Bottom row: first differences ────────────────────────────────────
+    # Identity: Δraw ≈ Δm̂(X) + ATE
+    # Blue bars  = Δraw  (year-on-year change actually observed)
+    # Grey bars  = Δm̂(X) (change attributed to X-composition drift)
+    # Orange line = ATE  (the model's constant per-year true trend)
+    # The two bars should stack to match the orange line if X fully
+    # explains any deviation of the raw changes from ATE.
+    for ax, s, ate, title, ylabel in diff_panels:
+        _style_series_axis(ax)
+        years = s["year"].to_numpy()
+        if len(years) < 2:
+            ax.set_visible(False)
+            continue
+
+        diff_years = years[1:]
+        d_raw = np.diff(s["raw_mean"].to_numpy())
+        d_cond = np.diff(s["cond_mean"].to_numpy())
+
+        bar_w = 0.35
+        offsets = np.arange(len(diff_years), dtype=float)
+        ax.bar(
+            offsets - bar_w / 2,
+            d_raw,
+            width=bar_w,
+            color=_RAW,
+            alpha=0.75,
+            label="Δ raw mean",
+            zorder=3,
+        )
+        ax.bar(
+            offsets + bar_w / 2,
+            d_cond,
+            width=bar_w,
+            color=_COND,
+            alpha=0.75,
+            label="Δ m̂(X)  [confounding]",
+            zorder=3,
+        )
+
+        # ATE as horizontal reference: constant true trend per year
+        ax.axhline(
+            ate,
+            color=_TREND,
+            linewidth=1.8,
+            linestyle="-",
+            label=f"ATE {ate:+.4f}/yr  [true trend]",
+            zorder=4,
+        )
+        ax.axhline(0, color=style.TEXT_MUTED, linewidth=0.6, linestyle="--", zorder=1)
+
+        ax.set_xticks(offsets)
+        ax.set_xticklabels(
+            [f"{diff_years[i] - 1}→{diff_years[i]}" for i in range(len(diff_years))],
+            fontsize=7.5,
+            rotation=0,
+            ha="center",
+        )
+        ax.set_xlabel("Year transition", **style.FONT_LABEL)
+        ax.set_ylabel(ylabel, **style.FONT_LABEL)
+        _panel_chip(ax, title)
+        ax.legend(
+            loc="upper right", frameon=False, fontsize=8.2, labelcolor=style.TEXT_MUTED
         )
 
     species_label = prediction.species.replace("_", " ").title()
@@ -646,7 +746,8 @@ def plot_yearly_trend(
     )
     _footer_note(
         fig,
-        f"Occurrence ATE {prediction.ate_occ:+.4f}/yr  •  Count ATE {prediction.ate_count:+.4f}/yr",
+        f"Occurrence ATE {prediction.ate_occ:+.4f}/yr  •  Count ATE {prediction.ate_count:+.4f}/yr  "
+        f"•  bottom row: Δraw ≈ Δm̂(X) + ATE",
     )
     fig.tight_layout(rect=[0.02, 0.06, 0.98, 0.88])
 
@@ -732,11 +833,9 @@ def _plot_distribution_panel(
             return
         ax.hist(positive, bins=bins, color=color, alpha=0.78)
         ax.set_xscale("log")
+        ax.xaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda x, _: f"{x:g}"))
         zero_share = 100.0 * (clean <= 0.0).mean()
-        note = (
-            f"median {np.median(clean):.3f}"
-            f"  •  zero cells {zero_share:.1f}%"
-        )
+        note = f"median {np.median(clean):.3f}  •  zero cells {zero_share:.1f}%"
     else:
         lo, hi = np.nanpercentile(clean, [0.5, 99.5])
         hist_values = clean[(clean >= lo) & (clean <= hi)]
@@ -922,9 +1021,9 @@ def plot_prediction_distribution_summary(
     compare_ax.set_xlabel("Abundance trend (%/yr)", **style.FONT_LABEL)
 
     species_label = prediction.species.replace("_", " ").title()
-    subtitle = "Saved prediction distributions and compact run summary"
+    subtitle = "Occurrence and abundance distributions, trend components, and run statistics"
     if ensemble is not None:
-        subtitle = "Saved prediction distributions and ensemble-aware run summary"
+        subtitle = "Occurrence and abundance distributions, trend components, and ensemble uncertainty"
     _header_block(fig, species_label, subtitle)
 
     footer = (
