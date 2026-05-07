@@ -6,10 +6,10 @@ clips each cell to the UK coastline
 
 Usage
 -----
-    uv run python scripts/make_hex_map.py
-    uv run python scripts/make_hex_map.py --results output/run1 --species blackbird
-    uv run python scripts/make_hex_map.py --hex-size 15000   # 15 km circumradius
-    uv run python scripts/make_hex_map.py --dpi 150 --species starling
+    uv run python scripts/products/make_hex_map.py
+    uv run python scripts/products/make_hex_map.py --results output/run1 --species blackbird
+    uv run python scripts/products/make_hex_map.py --hex-size 15000   # 15 km circumradius
+    uv run python scripts/products/make_hex_map.py --dpi 150 --species starling
 
 Output
 ------
@@ -30,10 +30,15 @@ import matplotlib.colors as mc
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import rasterio
+import rasterio.enums
+import rasterio.features
+import rasterio.transform
+import rasterio.warp
 from matplotlib.patches import Patch
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, shape as sh_shape
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from bgbw_trends.viz import style
 from bgbw_trends.viz._bng import refs_to_en
@@ -57,6 +62,62 @@ _DEFAULT_UK_SHP = Path(
     "/home/nilomr/projects/bgbw.metadata.pipeline"
     "/data/metadata/uk-shapefile/UK-shapefile.shp"
 )
+
+_RASTER_SUFFIXES = {".png", ".tif", ".tiff", ".img"}
+
+
+def _load_mask_gdf(
+    path: Path | str,
+    mask_crs: str = "EPSG:27700",
+    simplify_tol: float = 200.0,
+    min_area_m2: float = 100_000.0,
+) -> gpd.GeoDataFrame:
+    """Load a land-mask GeoDataFrame from a shapefile or a georeferenced raster.
+
+    For raster sources (PNG + worldfile, GeoTIFF, …):
+      - Band 1 is thresholded at 128: values > 128 = land.
+      - The worldfile sets the pixel-to-coordinate transform; CRS is not
+        stored in a worldfile so supply it via *mask_crs* (default EPSG:27700).
+      - Polygons below *min_area_m2* are dropped to remove noise pixels.
+      - Each polygon is simplified to *simplify_tol* metres to keep the
+        geometry manageable while preserving coastline detail.
+    """
+    path = Path(path)
+    if path.suffix.lower() not in _RASTER_SUFFIXES:
+        gdf = gpd.read_file(path)
+        if gdf.crs.to_epsg() != 27700:
+            gdf = gdf.to_crs(epsg=27700)
+        return gdf
+
+    logger.info("Vectorising raster mask %s …", path)
+    with rasterio.open(path) as src:
+        band = src.read(1)
+        transform = src.transform
+        crs = src.crs or rasterio.crs.CRS.from_string(mask_crs)
+
+    land = (band > 128).astype(np.uint8)
+    polys = [
+        sh_shape(geom)
+        for geom, _ in rasterio.features.shapes(land, mask=land, transform=transform)
+    ]
+
+    if not polys:
+        raise ValueError(
+            f"No land pixels found in {path}. Check white=land convention and --mask-crs."
+        )
+
+    gdf = gpd.GeoDataFrame(geometry=polys, crs=crs)
+    if gdf.crs.to_epsg() != 27700:
+        gdf = gdf.to_crs(epsg=27700)
+
+    gdf = gdf[gdf.geometry.area >= min_area_m2].copy()
+    if simplify_tol > 0:
+        gdf["geometry"] = gdf.geometry.simplify(simplify_tol, preserve_topology=True)
+        gdf = gdf[~gdf.geometry.is_empty]
+
+    logger.info("  → %d land polygons", len(gdf))
+    return gdf
+
 
 _COMMON_NAMES: dict[str, str] = {
     "blackbird": "Common Blackbird  —  Turdus merula",
@@ -207,7 +268,8 @@ def plot_hex_abundance(
     pct_trend_vmax: float = 95.0,
     gamma: float = 0.5,
     output_path: Path | str | None = None,
-    uk_shp: Path | str = _DEFAULT_UK_SHP,
+    mask: Path | str = _DEFAULT_UK_SHP,
+    mask_crs: str = "EPSG:27700",
     dpi: int = 300,
 ) -> plt.Figure:
     """Two-panel hexagonal map: expected abundance and abundance trend.
@@ -246,19 +308,46 @@ def plot_hex_abundance(
         Power-norm exponent for the abundance scale (< 1 lifts low values).
     output_path:
         Save path; parent directories are created automatically.
-    uk_shp:
-        UK boundary shapefile; re-projected to EPSG:27700 if needed.
+    mask:
+        Land-boundary file: shapefile (.shp/.gpkg) or georeferenced raster
+        (PNG + .pgw worldfile, GeoTIFF).  Re-projected to EPSG:27700 if needed.
+    mask_crs:
+        CRS of the mask file when it cannot be inferred (e.g. PNG + worldfile).
+        Ignored for shapefiles and GeoTIFFs with embedded CRS.
     dpi:
         Output resolution in dots per inch.
     """
     style.apply()
 
-    # ── UK boundary ────────────────────────────────────────────────────────
-    uk = gpd.read_file(uk_shp)
-    if uk.crs.to_epsg() != 27700:
-        uk = uk.to_crs(epsg=27700)
+    # ── Land boundary ──────────────────────────────────────────────────────
+    uk = _load_mask_gdf(mask, mask_crs=mask_crs)
     uk_union = uk.geometry.union_all()
-    bounds = uk.total_bounds  # (minx, miny, maxx, maxy)
+    # For raster masks the extent is much wider than the UK data; derive
+    # bounds from the prediction points so the hex grid stays tight.
+    mask_path = Path(mask)
+    if mask_path.suffix.lower() in _RASTER_SUFFIXES:
+        _bounds_src = "data"
+        # Read PNG at 1/4 resolution for background imshow (full res = ~90 MB RGBA)
+        _scale = 4
+        with rasterio.open(mask_path) as _src:
+            _mh = max(1, _src.height // _scale)
+            _mw = max(1, _src.width // _scale)
+            _mband = _src.read(
+                1,
+                out_shape=(_mh, _mw),
+                resampling=rasterio.enums.Resampling.nearest,
+            )
+            _mbounds = _src.bounds
+        _no_data_rgb = mc.to_rgb(_NO_DATA)
+        _mask_rgba = np.zeros((*_mband.shape, 4), dtype=np.float32)
+        _land_px = _mband > 128
+        _mask_rgba[_land_px, :3] = _no_data_rgb
+        _mask_rgba[_land_px, 3] = 1.0
+    else:
+        _bounds_src = "mask"
+        _mask_rgba = None
+        _mbounds = None
+        bounds = uk.total_bounds  # (minx, miny, maxx, maxy)
 
     # ── 1 km cell centroids ────────────────────────────────────────────────
     # refs_to_en returns SW corner; +500 m shifts to true centroid.
@@ -279,20 +368,35 @@ def plot_hex_abundance(
         north_t = north_sw[mask_tau] + 500.0
         tau = tau_raw[mask_tau] * 100.0  # ratio → % yr⁻¹
 
+    if _bounds_src == "data":
+        all_east = east_a if not has_trend else np.concatenate([east_a, east_t])
+        all_north = north_a if not has_trend else np.concatenate([north_a, north_t])
+        pad = hex_size * 2
+        bounds = (
+            float(all_east.min()) - pad,
+            float(all_north.min()) - pad,
+            float(all_east.max()) + pad,
+            float(all_north.max()) + pad,
+        )
+
     # ── Hex grid → aggregate → clip ────────────────────────────────────────
     logger.info("Building %g km hex grid...", hex_size / 1_000)
     hex_base = _make_hex_grid(bounds, hex_size)
 
     hex_gdf = _aggregate_to_hex(east_a, north_a, abd, hex_base, min_cells=min_cells)
+    hex_gdf_export = hex_gdf.copy()  # full hex shapes; raster export applies PNG mask
     logger.info("Clipping %d abundance hexes to UK boundary...", len(hex_gdf))
     hex_gdf["geometry"] = hex_gdf.geometry.intersection(uk_union)
     hex_gdf = hex_gdf[~hex_gdf.geometry.is_empty & hex_gdf["abundance"].notna()]
 
     if has_trend:
         hex_tau = _aggregate_to_hex(east_t, north_t, tau, hex_base, min_cells=min_cells)
+        hex_tau_export = hex_tau.copy()
         logger.info("Clipping %d trend hexes to UK boundary...", len(hex_tau))
         hex_tau["geometry"] = hex_tau.geometry.intersection(uk_union)
         hex_tau = hex_tau[~hex_tau.geometry.is_empty & hex_tau["abundance"].notna()]
+    else:
+        hex_tau_export = None
 
     # ── Colour scales ──────────────────────────────────────────────────────
     abd_vals = hex_gdf["abundance"].to_numpy(dtype=np.float64)
@@ -305,8 +409,12 @@ def plot_hex_abundance(
             "[%s] Abundance colour scale clipped: %d hex%s (%.1f%%) outside "
             "[%.3f, %.3f] — shown as end-of-scale colour. "
             "Pass --pct-vmax to widen the range.",
-            title, n_clip_abd, "es" if n_clip_abd != 1 else "",
-            100.0 * n_clip_abd / len(abd_vals), abd_vmin, abd_vmax,
+            title,
+            n_clip_abd,
+            "es" if n_clip_abd != 1 else "",
+            100.0 * n_clip_abd / len(abd_vals),
+            abd_vmin,
+            abd_vmax,
         )
 
     if has_trend:
@@ -320,8 +428,12 @@ def plot_hex_abundance(
                 "[%s] Trend colour scale clipped: %d hex%s (%.1f%%) outside "
                 "[%.2f, %.2f]%% yr⁻¹ — shown as end-of-scale colour. "
                 "Pass --pct-trend-vmax to widen the range.",
-                title, n_clip_tau, "es" if n_clip_tau != 1 else "",
-                100.0 * n_clip_tau / len(tau_vals), tau_lo, tau_hi,
+                title,
+                n_clip_tau,
+                "es" if n_clip_tau != 1 else "",
+                100.0 * n_clip_tau / len(tau_vals),
+                tau_lo,
+                tau_hi,
             )
 
     # ── Layout ─────────────────────────────────────────────────────────────
@@ -383,7 +495,7 @@ def plot_hex_abundance(
             abd_norm,
             _HEX_CMAP,
             "Expected abundance",
-            "E[abundance] = P(occ) × E[count | occ]  (individuals per visit)",
+            "E[abundance] = P(occ) × E[count | occ]  (individuals per survey)",
             False,
         ),
     ]
@@ -411,7 +523,16 @@ def plot_hex_abundance(
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
 
-        uk.plot(ax=ax, color=_NO_DATA, linewidth=0, zorder=1)
+        if _mask_rgba is not None:
+            ax.imshow(
+                _mask_rgba,
+                extent=[_mbounds.left, _mbounds.right, _mbounds.bottom, _mbounds.top],
+                origin="upper",
+                zorder=1,
+                interpolation="nearest",
+            )
+        else:
+            uk.plot(ax=ax, color=_NO_DATA, linewidth=0, zorder=1)
         gdf.plot(
             ax=ax,
             column="abundance",
@@ -508,7 +629,223 @@ def plot_hex_abundance(
         fig.savefig(output_path, dpi=dpi, facecolor=style.PAPER)
         logger.info("Saved → %s", output_path)
 
-    return fig
+    return (
+        fig,
+        hex_gdf_export,
+        hex_tau_export,
+        abd_norm,
+        _HEX_CMAP,
+        (tau_norm if has_trend else None),
+        (tau_cmap if has_trend else None),
+    )
+
+
+# ── Raster export ─────────────────────────────────────────────────────────
+
+
+def _apply_raster_mask(
+    raster: np.ndarray,
+    transform: rasterio.transform.Affine,
+    mask_path: Path | str,
+    mask_crs: str = "EPSG:27700",
+) -> np.ndarray:
+    """Null (NaN) any pixel where the PNG land mask shows water (value ≤ 128).
+
+    The mask is reprojected to the raster's exact grid using nearest-neighbour
+    resampling, so the result is pixel-accurate with the source PNG.
+    """
+    h, w = raster.shape
+    water = np.empty((h, w), dtype=np.uint8)
+    with rasterio.open(mask_path) as src:
+        src_crs = src.crs or rasterio.crs.CRS.from_string(mask_crs)
+        rasterio.warp.reproject(
+            source=rasterio.band(src, 1),
+            destination=water,
+            src_transform=src.transform,
+            src_crs=src_crs,
+            dst_transform=transform,
+            dst_crs=rasterio.crs.CRS.from_string("EPSG:27700"),
+            resampling=rasterio.enums.Resampling.nearest,
+        )
+    out = raster.copy()
+    out[water <= 128] = np.nan
+    return out
+
+
+def _write_qml(
+    out_path: Path,
+    norm: mc.Normalize,
+    cmap: mc.Colormap,
+    n_steps: int = 64,
+) -> None:
+    """Write a QGIS .qml style file encoding the same norm+cmap as the PNG."""
+    if isinstance(norm, mc.TwoSlopeNorm):
+        vmin = float(norm.vmin)
+        vcenter = float(norm.vcenter)
+        vmax = float(norm.vmax)
+        lo = np.linspace(vmin, vcenter, n_steps // 2, endpoint=False)
+        hi = np.linspace(vcenter, vmax, n_steps // 2)
+        values = np.concatenate([lo, hi])
+    else:
+        values = np.linspace(float(norm.vmin), float(norm.vmax), n_steps)
+
+    rgba = cmap(norm(values))  # (n, 4) float 0–1
+    items = []
+    for val, (r, g, b, a) in zip(values, rgba):
+        ri, gi, bi, ai = int(r * 255), int(g * 255), int(b * 255), int(a * 255)
+        items.append(
+            f'          <item alpha="{ai}" value="{val:.8g}" '
+            f'color="#{ri:02x}{gi:02x}{bi:02x}" label="{val:.4g}"/>'
+        )
+
+    qml = (
+        "<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>\n"
+        '<qgis version="3.28" styleCategories="AllStyleCategories" hasScaleBasedVisibilityFlag="0">\n'
+        "  <flags>\n"
+        "    <Identifiable>1</Identifiable>\n"
+        "    <Removable>1</Removable>\n"
+        "    <Searchable>1</Searchable>\n"
+        "    <Private>0</Private>\n"
+        "  </flags>\n"
+        "  <pipe>\n"
+        "    <provider>\n"
+        '      <resampling enabled="false" zoomedInResamplingMethod="nearestNeighbour"'
+        ' zoomedOutResamplingMethod="nearestNeighbour" maxOversampling="2"/>\n'
+        "    </provider>\n"
+        '    <rasterrenderer opacity="1" type="singlebandpseudocolor" band="1" nodataColor="">\n'
+        "      <rasterTransparency/>\n"
+        "      <minMaxOrigin><limits>None</limits><extent>WholeRaster</extent></minMaxOrigin>\n"
+        "      <rastershader>\n"
+        f'        <colorrampshader colorRampType="INTERPOLATED" classificationMode="1" clip="1"'
+        f' minimumValue="{values[0]:.8g}" maximumValue="{values[-1]:.8g}">\n'
+        '          <colorramp type="randomcolors" name="[source]"/>\n'
+        + "\n".join(items)
+        + "\n"
+        "        </colorrampshader>\n"
+        "      </rastershader>\n"
+        "    </rasterrenderer>\n"
+        '    <brightnesscontrast brightness="0" contrast="0" gamma="1"/>\n'
+        '    <huesaturation colorizeOn="0" colorizeBlue="128" colorizeGreen="128"'
+        ' colorizeStrength="100" colorizeRed="255" invertColors="0" saturation="0" grayscaleMode="0"/>\n'
+        '    <rasterresampler maxOversampling="2"/>\n'
+        "    <resamplingStage>resamplingFilter</resamplingStage>\n"
+        "  </pipe>\n"
+        "  <blendMode>0</blendMode>\n"
+        "</qgis>\n"
+    )
+    out_path.write_text(qml, encoding="utf-8")
+    logger.info(
+        "Style  → %s  (load the .tif in QGIS; style auto-applies — do not open the .qml directly)",
+        out_path,
+    )
+
+
+def export_hex_rasters(
+    hex_abd: gpd.GeoDataFrame,
+    hex_trend: gpd.GeoDataFrame | None,
+    output_dir: Path,
+    species: str,
+    resolution: float = 1_000.0,
+    abd_col: str = "abundance",
+    abd_norm: mc.Normalize | None = None,
+    abd_cmap: mc.Colormap | None = None,
+    trend_norm: mc.Normalize | None = None,
+    trend_cmap: mc.Colormap | None = None,
+    raster_mask_path: Path | str | None = None,
+    mask_crs: str = "EPSG:27700",
+) -> None:
+    """Rasterise hex GeoDataFrames and write GeoTIFFs in EPSG:27700.
+
+    A matching QGIS .qml style file is written alongside each .tif when
+    norm and cmap are supplied, so the layer renders identically to the PNG.
+    When *raster_mask_path* is given (PNG + worldfile or GeoTIFF), the mask
+    is reprojected to the output grid and water pixels are set to NaN —
+    giving pixel-accurate coastal masking.
+
+    Parameters
+    ----------
+    hex_abd:
+        Hex GeoDataFrame with abundance values (column *abd_col*).
+    hex_trend:
+        Hex GeoDataFrame with trend values (column *abd_col*), or None.
+    output_dir:
+        Directory to write ``<species>_abundance.tif`` / ``<species>_trend.tif``.
+    species:
+        Used to build output filenames.
+    resolution:
+        Pixel size in metres (default 1 000 = 1 km).
+    abd_col:
+        Column in both GeoDataFrames holding the value to rasterise.
+    abd_norm, abd_cmap:
+        Matplotlib norm/cmap used for the abundance panel.
+    trend_norm, trend_cmap:
+        Matplotlib norm/cmap used for the trend panel.
+    raster_mask_path:
+        Optional path to a raster land mask (white=land, black=water).
+        Applied after rasterising to null out water pixels exactly.
+    mask_crs:
+        CRS of the mask if not embedded (e.g. PNG + worldfile).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    layers: list[tuple[gpd.GeoDataFrame, str, mc.Normalize | None, mc.Colormap | None]] = [
+        (hex_abd, "abundance", abd_norm, abd_cmap)
+    ]
+    if hex_trend is not None:
+        layers.append((hex_trend, "trend", trend_norm, trend_cmap))
+
+    for gdf, layer_name, norm, cmap in layers:
+        gdf = gdf[gdf[abd_col].notna()].copy()
+        minx, miny, maxx, maxy = gdf.total_bounds
+
+        # Snap bounds outward to a clean multiple of resolution
+        minx = np.floor(minx / resolution) * resolution
+        miny = np.floor(miny / resolution) * resolution
+        maxx = np.ceil(maxx / resolution) * resolution
+        maxy = np.ceil(maxy / resolution) * resolution
+
+        width = int(round((maxx - minx) / resolution))
+        height = int(round((maxy - miny) / resolution))
+        transform = rasterio.transform.from_bounds(minx, miny, maxx, maxy, width, height)
+
+        shapes = (
+            (geom, float(val))
+            for geom, val in zip(gdf.geometry, gdf[abd_col])
+            if geom is not None and not geom.is_empty
+        )
+        raster = rasterio.features.rasterize(
+            shapes,
+            out_shape=(height, width),
+            transform=transform,
+            fill=np.nan,
+            dtype="float32",
+            merge_alg=rasterio.enums.MergeAlg.replace,
+        )
+
+        if raster_mask_path is not None:
+            raster = _apply_raster_mask(raster, transform, raster_mask_path, mask_crs)
+
+        out_path = output_dir / f"{species}_{layer_name}.tif"
+        with rasterio.open(
+            out_path,
+            "w",
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype="float32",
+            crs="EPSG:27700",
+            transform=transform,
+            nodata=np.nan,
+            compress="lzw",
+        ) as dst:
+            dst.write(raster, 1)
+            dst.update_tags(species=species, layer=layer_name)
+
+        logger.info("Raster → %s", out_path)
+
+        if norm is not None and cmap is not None:
+            _write_qml(out_path.with_suffix(".qml"), norm, cmap)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -559,9 +896,37 @@ def _parse_args() -> argparse.Namespace:
         help="abundance percentile anchoring the top of the colour scale (default: 99)",
     )
     p.add_argument(
-        "--uk-shp",
+        "--mask",
         default=None,
-        help="UK boundary shapefile; uses built-in default if omitted",
+        help=(
+            "land-boundary file: shapefile (.shp/.gpkg) or georeferenced raster "
+            "(PNG + .pgw worldfile, GeoTIFF); uses built-in shapefile default if omitted"
+        ),
+    )
+    p.add_argument(
+        "--mask-crs",
+        default="EPSG:27700",
+        dest="mask_crs",
+        help=(
+            "CRS of the mask when it cannot be inferred (PNG + worldfile only); "
+            "default EPSG:27700"
+        ),
+    )
+    p.add_argument(
+        "--no-raster",
+        action="store_true",
+        dest="no_raster",
+        help="skip GeoTIFF export (PNG only)",
+    )
+    p.add_argument(
+        "--raster-resolution",
+        type=float,
+        default=None,
+        dest="raster_resolution",
+        help=(
+            "raster pixel size in metres; defaults to hex_size/20 "
+            "(e.g. 150 m for the default 3 km hex)"
+        ),
     )
     return p.parse_args()
 
@@ -596,7 +961,7 @@ def main() -> None:
         logger.error("No valid species to map.")
         sys.exit(1)
 
-    shp_path = args.uk_shp or _DEFAULT_UK_SHP
+    mask_path = args.mask or _DEFAULT_UK_SHP
     logger.info("Mapping %d species → %s", len(species_list), maps_dir)
 
     for sp in species_list:
@@ -606,7 +971,7 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "hex_abundance.png"
         logger.info("[%s] hex map → %s", sp, out_path)
-        plot_hex_abundance(
+        _fig, hex_abd, hex_trend, abd_norm, abd_cmap, tau_norm, tau_cmap = plot_hex_abundance(
             df,
             title=sp,
             species_label=label,
@@ -615,9 +980,33 @@ def main() -> None:
             gamma=args.gamma,
             pct_vmax=args.pct_vmax,
             output_path=out_path,
-            uk_shp=shp_path,
+            mask=mask_path,
+            mask_crs=args.mask_crs,
             dpi=args.dpi,
         )
+        if not args.no_raster:
+            _mp = Path(mask_path)
+            if args.raster_resolution:
+                resolution = args.raster_resolution
+            elif _mp.suffix.lower() in _RASTER_SUFFIXES:
+                with rasterio.open(_mp) as _src:
+                    resolution = abs(_src.transform.a)
+                logger.info("Raster resolution matched to PNG: %.1f m", resolution)
+            else:
+                resolution = args.hex_size / 20.0
+            export_hex_rasters(
+                hex_abd,
+                hex_trend,
+                output_dir=out_dir,
+                species=sp,
+                resolution=resolution,
+                abd_norm=abd_norm,
+                abd_cmap=abd_cmap,
+                trend_norm=tau_norm,
+                trend_cmap=tau_cmap,
+                raster_mask_path=_mp if _mp.suffix.lower() in _RASTER_SUFFIXES else None,
+                mask_crs=args.mask_crs,
+            )
 
     logger.info("Done.")
 

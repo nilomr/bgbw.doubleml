@@ -12,11 +12,12 @@ Optional diagnostics: null-trend simulation for residual confounding and
 a subsample ensemble for grid-level CATE uncertainty.
 
 Usage:
-    uv run python scripts/run_prototype.py
+    uv run python scripts/pipeline/run_prototype.py
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 from pathlib import Path
 
@@ -42,7 +43,7 @@ from bgbw_trends.console import (
 from bgbw_trends.data import (
     assemble_analysis_data,
     assemble_harmonized_data,
-    load_embeddings,
+    load_mean_embeddings,
 )
 from bgbw_trends.features.effort import compute_reference_effort
 from bgbw_trends.features.habitat import reduce_embeddings_pca
@@ -66,6 +67,15 @@ from bgbw_trends.trends import (
 
 setup_rich_logging(logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse CLI args so -h/--help exits safely without running the pipeline."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    return parser.parse_args()
 
 
 def _build_grid(df: pd.DataFrame) -> pd.DataFrame:
@@ -96,19 +106,20 @@ def _subsample_by_year(
 
 
 def main() -> None:
+    _parse_args()
+
     # ── Configuration ───────────────────────────────────────────────────
     run_ensemble = True  # slow — set True for uncertainty quantification
 
     cfg = RunConfig(
-        species=["nuthatch"],
-        years=[2005, 2015, 2025],
-        embedding_year=2019,
+        species=["blackcap"],
+        years=list(range(2017, 2025, 1)),
         output_dir=Path("output/prototype"),
-        n_folds=3,
-        n_rep=3,
-        n_pca_components=5,
-        n_estimators=300,
-        cf_n_estimators=500,
+        n_folds=5,
+        n_rep=4,
+        n_pca_components=30,
+        n_estimators=700,
+        cf_n_estimators=700,
         cf_min_samples_leaf=50,
     )
     out = cfg.output_paths()
@@ -201,16 +212,16 @@ def main() -> None:
         sdm_rows.extend(
             [
                 # marginal m̂(X): predicts Y from X, OOB preds become Y.hat
-                (sp, "marginal · occurrence",   "Brier",    diag.occurrence_brier),
-                (sp, "marginal · occurrence",   "ROC AUC",  diag.occurrence_auc),
-                (sp, "marginal · occurrence",   "PR AUC",   diag.occurrence_pr_auc),
-                (sp, "marginal · count | occ",  "R²",       diag.count_r2),
-                (sp, "marginal · count | occ",  "RMSE",     diag.count_rmse),
+                (sp, "marginal · occurrence", "Brier", diag.occurrence_brier),
+                (sp, "marginal · occurrence", "ROC AUC", diag.occurrence_auc),
+                (sp, "marginal · occurrence", "PR AUC", diag.occurrence_pr_auc),
+                (sp, "marginal · count | occ", "R²", diag.count_r2),
+                (sp, "marginal · count | occ", "RMSE", diag.count_rmse),
                 # propensity ŝ(X): predicts year from X, OOB preds become T.hat
                 # High R² = strong temporal confounding; DML is doing real work.
                 # R² > 0.85 may indicate a year-proxy feature leaking into X.
-                (sp, "propensity · occurrence", "R²",       diag.propensity_occ_r2),
-                (sp, "propensity · count | occ","R²",       diag.propensity_count_r2),
+                (sp, "propensity · occurrence", "R²", diag.propensity_occ_r2),
+                (sp, "propensity · count | occ", "R²", diag.propensity_count_r2),
             ]
         )
         diagnostics_rows.append(
@@ -282,18 +293,28 @@ def main() -> None:
     for sp, models in trained_models.items():
         sp_label = sp.replace("_", " ").title()
         console.print(f"  [dim]{sp}[/dim]  SDM marginal forests…")
-        with timed_step("  SDM occ SHAP"):
+        with timed_step(f"  SDM occ SHAP  (approx, n=500 rows)"):
             occ_expl = explain_tree_model(models.y_bin_forest, models.X_marg_occ)
-        with timed_step("  SDM count SHAP"):
+        with timed_step(f"  SDM count SHAP  (approx, n=500 rows)"):
             count_expl = explain_tree_model(models.y_count_forest, models.X_marg_count)
         console.print(f"  [dim]{sp}[/dim]  CATE surrogate forests…")
-        with timed_step("  CATE occ SHAP"):
+        with timed_step(
+            f"  CATE occ  surrogate fit → SHAP (n={len(models.tau_occ)} rows)"
+        ):
             cate_occ_expl = explain_cate_surrogate(
-                models.bin_cf, models.W_occ, models.W_feature_names
+                models.bin_cf,
+                models.W_occ,
+                models.W_feature_names,
+                tau_hat=models.tau_occ,
             )
-        with timed_step("  CATE count SHAP"):
+        with timed_step(
+            f"  CATE count  surrogate fit → SHAP (n={len(models.tau_count)} rows)"
+        ):
             cate_count_expl = explain_cate_surrogate(
-                models.count_cf, models.W_count, models.W_feature_names
+                models.count_cf,
+                models.W_count,
+                models.W_feature_names,
+                tau_hat=models.tau_count,
             )
 
         fig = plot_shap_panel(
@@ -355,7 +376,7 @@ def main() -> None:
                 total=None,
             )
             harmonized = assemble_harmonized_data(cfg)
-            embeddings = load_embeddings(cfg.embedding_year)
+            embeddings = load_mean_embeddings(cfg.embedding_years)
             ens = fit_ensemble_trend(
                 harmonized=harmonized,
                 embeddings=embeddings,
@@ -364,7 +385,6 @@ def main() -> None:
                 grid=grid,
                 reference_effort=cfg.reference_effort,
                 n_ensemble=n_ensemble,
-                subsample_fraction=0.75,
                 pca_model=embedding_pca,
             )
         ensemble_path = out.species_ensemble_file(cfg.species[0])

@@ -6,10 +6,10 @@ trend and SDM map figures, without needing to re-run the model.
 
 Usage
 -----
-    uv run python scripts/make_maps.py                        # default output/prototype/
-    uv run python scripts/make_maps.py --results output/run1  # custom path
-    uv run python scripts/make_maps.py --species blackbird starling
-    uv run python scripts/make_maps.py --metric occ_ppy --dpi 150
+    uv run python scripts/pipeline/make_maps.py                        # default output/prototype/
+    uv run python scripts/pipeline/make_maps.py --results output/run1  # custom path
+    uv run python scripts/pipeline/make_maps.py --species blackbird starling
+    uv run python scripts/pipeline/make_maps.py --metric occ_ppy --dpi 150
 
 Output
 ------
@@ -30,7 +30,7 @@ from pathlib import Path
 import pandas as pd
 
 # Ensure the package is importable when running as a script.
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from bgbw_trends.viz.maps import plot_bivariate, plot_sdm, plot_trend
 

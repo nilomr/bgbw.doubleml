@@ -35,8 +35,8 @@ This gives a per-year relative abundance change combining occurrence and count c
 
 ## Main entry points
 
-- `scripts/run_prototype.py`: run model training and write predictions/figures.
-- `scripts/make_maps.py`: regenerate map figures from saved parquet outputs.
+- `scripts/pipeline/run_prototype.py`: run model training and write predictions/figures.
+- `scripts/pipeline/make_maps.py`: regenerate map figures from saved parquet outputs.
 
 ## Setup
 
@@ -47,8 +47,8 @@ uv sync
 ## Run
 
 ```bash
-uv run python scripts/run_prototype.py
-uv run python scripts/make_maps.py
+uv run python scripts/pipeline/run_prototype.py
+uv run python scripts/pipeline/make_maps.py
 ```
 
 ## Outputs
