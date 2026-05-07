@@ -124,6 +124,60 @@ def load_embeddings(
     return result
 
 
+def load_mean_embeddings(
+    years: list[int] | None = None,
+    directory: Path = AEF_DIR,
+    summaries: list[str] | None = None,
+) -> pd.DataFrame:
+    """Load AEF embeddings for multiple years and return their cell-wise mean.
+
+    Averaging across years reduces sensitivity to interannual variation while preserving
+    the stable spatial signal of landscape character.  The intersection of
+    cells present in all requested years is retained (should be full).
+
+    Parameters
+    ----------
+    years : list[int] or None
+        Years to average over.  If None, all ``aef_bng1km_*_uk.parquet``
+        files found in *directory* are used.
+    directory : Path
+        Directory containing AEF parquet files.
+    summaries : list[str] or None
+        Passed through to :func:`load_embeddings`.
+    """
+    if years is None:
+        years = sorted(
+            int(p.stem.split("_")[2]) for p in directory.glob("aef_bng1km_*_uk.parquet")
+        )
+        if not years:
+            raise FileNotFoundError(f"No AEF embedding files found in {directory}")
+
+    frames = [
+        load_embeddings(y, directory=directory, summaries=summaries) for y in years
+    ]
+
+    # Restrict to cells present in every year
+    common_index = frames[0].index
+    for f in frames[1:]:
+        common_index = common_index.intersection(f.index)
+    frames = [f.loc[common_index] for f in frames]
+
+    # Average all numeric columns across years
+    avg_cols = [c for c in frames[0].columns]
+    result = frames[0].copy()
+    for col in avg_cols:
+        result[col] = np.mean([f[col].to_numpy() for f in frames], axis=0)
+
+    logger.info(
+        "Using mean embeddings over %d years (%s): %d cells "
+        "(intersection across all years)",
+        len(years),
+        ", ".join(str(y) for y in years),
+        len(result),
+    )
+    return result
+
+
 def load_weather(
     years: list[int],
     path: Path = WEATHER_PATH,
@@ -146,8 +200,9 @@ def load_weather(
     if not path.exists():
         raise FileNotFoundError(f"Weather parquet not found: {path}")
 
-    df = pd.read_parquet(path, columns=["year", "projection_x", "projection_y",
-                                        "tas_mean", "rainfall"])
+    df = pd.read_parquet(
+        path, columns=["year", "projection_x", "projection_y", "tas_mean", "rainfall"]
+    )
     df = df[df["year"].isin(years)]
     if df.empty:
         logger.warning("No weather data found for years %s in %s", years, path)
@@ -214,14 +269,17 @@ def load_january_weather(
 
     df = pd.read_parquet(
         path,
-        columns=["year", "projection_x", "projection_y",
-                 "jan_mean_temp", "jan_total_rain"],
+        columns=[
+            "year",
+            "projection_x",
+            "projection_y",
+            "jan_mean_temp",
+            "jan_total_rain",
+        ],
     )
     df = df[df["year"].isin(years)]
     if df.empty:
-        logger.warning(
-            "No January-weather data found for years %s in %s", years, path
-        )
+        logger.warning("No January-weather data found for years %s in %s", years, path)
         return pd.DataFrame(
             columns=["bng_ref", "year", "jan_mean_temp_c", "jan_total_rain_mm"]
         )
@@ -247,10 +305,12 @@ def load_january_weather(
 
     result = (
         df[["bng_ref", "year", "jan_mean_temp", "jan_total_rain"]]
-        .rename(columns={
-            "jan_mean_temp":  "jan_mean_temp_c",
-            "jan_total_rain": "jan_total_rain_mm",
-        })
+        .rename(
+            columns={
+                "jan_mean_temp": "jan_mean_temp_c",
+                "jan_total_rain": "jan_total_rain_mm",
+            }
+        )
         .reset_index(drop=True)
     )
     logger.info(
@@ -298,7 +358,7 @@ def assemble_analysis_data(cfg: RunConfig) -> pd.DataFrame:
     Parameters
     ----------
     cfg : RunConfig
-        Specifies years, species, and embedding snapshot year.
+        Specifies years, species, and embedding years to average.
 
     Returns
     -------
@@ -309,8 +369,10 @@ def assemble_analysis_data(cfg: RunConfig) -> pd.DataFrame:
     harmonized = assemble_harmonized_data(cfg)
     surveys = aggregate_surveys(harmonized)
 
-    # 2. Load geospatial embeddings (single snapshot, time-invariant)
-    embeddings = load_embeddings(cfg.embedding_year)
+    # 2. Load geospatial embeddings averaged across all available years so that
+    #    cell representations are not at the mercy of interannual variation
+    #    (e.g. phenology artefacts, cloud-cover differences in any single year).
+    embeddings = load_mean_embeddings(cfg.embedding_years)
 
     # 3. Join embeddings on bng_ref
     merged = surveys.merge(embeddings, left_on="bng_ref", right_index=True, how="inner")

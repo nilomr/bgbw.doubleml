@@ -131,19 +131,19 @@ HABITAT_FEATURES = [
 # grid-cell level so the propensity model can capture interannual confounding
 # in observer demographics and survey mode.
 EFFORT_FEATURES = [
-    "n_surveys",          # sampling intensity per cell-year
-    "mean_observers",     # mean total observers (adults + children) per survey
-    "proportion_adult",   # proportion of total observers who are adults
+    "n_surveys",  # sampling intensity per cell-year
+    "mean_observers",  # mean total observers (adults + children) per survey
+    "proportion_adult",  # proportion of total observers who are adults
     "proportion_online",  # proportion of surveys submitted online (vs paper)
     # Survey-weekend weather — ambient detection conditions on the day.
     # X_effort only; frozen at median for SDM; NOT in W (see DEVELOPER_GUIDE §4.3).
-    "mean_temp_c",    # mean daily temperature across the survey weekend (°C)
+    "mean_temp_c",  # mean daily temperature across the survey weekend (°C)
     "total_rain_mm",  # total rainfall across the survey weekend (mm)
     # Pre-survey January weather — accumulated winter conditions before the weekend.
     # Captures year-level confounding: cold/wet Januaries depress bird activity
     # and observer motivation independently of conditions on the survey weekend.
     # X_effort only; frozen at median for SDM; NOT in W (see DEVELOPER_GUIDE §4.3).
-    "jan_mean_temp_c",    # mean daily temperature over non-survey January days (°C)
+    "jan_mean_temp_c",  # mean daily temperature over non-survey January days (°C)
     "jan_total_rain_mm",  # cumulative rainfall over non-survey January days (mm)
 ]
 
@@ -177,9 +177,9 @@ class ReferenceEffort:
     mean_observers: float = 1.3
     proportion_adult: float = 0.9
     proportion_online: float = 0.7
-    mean_temp_c: float = 4.3    # UK-median survey-weekend temperature (°C)
+    mean_temp_c: float = 4.3  # UK-median survey-weekend temperature (°C)
     total_rain_mm: float = 2.1  # UK-median 3-day rainfall total (mm)
-    jan_mean_temp_c: float = 4.0    # UK-median January mean temperature (°C)
+    jan_mean_temp_c: float = 4.0  # UK-median January mean temperature (°C)
     jan_total_rain_mm: float = 85.0  # UK-median cumulative January rainfall (mm)
 
 
@@ -236,7 +236,7 @@ class RunConfig:
 
     species: list[str] = field(default_factory=lambda: list(PROTOTYPE_SPECIES))
     years: list[int] = field(default_factory=lambda: list(range(2015, 2020)))
-    embedding_year: int = 2019
+    embedding_years: list[int] | None = None  # None → all available years in AEF_DIR
     output_dir: Path = Path("output")
 
     # Embedding PCA: reduce 128-dim embeddings to n_pca_components before
