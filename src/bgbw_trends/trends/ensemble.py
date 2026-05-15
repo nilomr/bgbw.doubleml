@@ -1,14 +1,18 @@
 """Grid-level ensemble of the two-part DML trend (Johnston 2025, §3.4).
 
-For each ensemble member the prepared surveys are split 50/50 (stratified
-by year) into non-overlapping halves — one for the occurrence stage, one
-for the count stage. Each half is independently aggregated to 1 km cells
-before being passed to ``train_predict_species``, so the two hurdle stages
-see genuinely different cell-level statistics and the chain-rule sum
-``occ_ppy + count_ppy`` is unbiased (Fink §3.2).
+For each ensemble member the assembled cell-year data are split 50/50
+(stratified by year) into non-overlapping halves — one for the occurrence
+stage, one for the count stage — via ``split_cell_years``. Each stage
+trains on its own set of cells so the chain-rule sum
+``occ_ppy + count_ppy`` is unbiased.
+
+This is the correct split level for BGBW: the median cell has only 2
+surveys per year, so splitting at the individual-survey level would reduce most cells to single-observation
+statistics. Splitting whole cell-year rows preserves each cell's
+aggregated statistics while still guaranteeing hurdle independence for the DML assumptions.
 
 Grid-cell point estimates are medians across members; 80% CIs use the
-10th/90th percentiles (Fink §3.3 Step 5).
+10th/90th percentiles.
 """
 
 from __future__ import annotations
@@ -19,10 +23,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from bgbw_trends.aggregate import aggregate_prepared_surveys, prepare_surveys
 from bgbw_trends.config import ReferenceEffort, RunConfig
 from bgbw_trends.features.effort import compute_reference_effort
-from bgbw_trends.features.habitat import apply_embedding_pca, reduce_embeddings_pca
 from bgbw_trends.pipeline import SpeciesPrediction, train_predict_species
 
 logger = logging.getLogger(__name__)
@@ -56,62 +58,53 @@ class EnsembleTrendResult:
     subsample_fraction: float
 
 
-def _split_prepared(
-    prepared: pd.DataFrame,
+def split_cell_years(
+    df: pd.DataFrame,
     rng: np.random.Generator,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split prepared surveys 50/50, stratified by year, with zero overlap.
+    """Split assembled cell-year rows 50/50, stratified by year, with zero overlap.
 
-    Surveys are shuffled within each year then divided at the midpoint, so
-    the occurrence and count halves are mutually exclusive. Each half is
-    subsequently aggregated independently, giving each hurdle stage different
-    cell-level statistics even for cells that would otherwise share surveys.
+    Rows are shuffled within each year then divided at the midpoint. Each
+    cell-year row goes to exactly one stage, so the occurrence and count halves
+    are mutually exclusive and the chain-rule sum is unbiased.
+
+    Splitting at the cell-year level (rather than at the individual-survey
+    level) preserves each cell's aggregated statistics. For BGBW, where the
+    median cell has 2 surveys per year, survey-level splitting would reduce
+    most cells to single binary observations.
     """
     occ_frames, count_frames = [], []
-    for _year, group in prepared.groupby("year"):
+    for _year, group in df.groupby("year"):
         idx = rng.permutation(group.index)
         mid = len(idx) // 2
         occ_frames.append(group.loc[idx[:mid]])
         count_frames.append(group.loc[idx[mid:]])
-    occ = pd.concat(occ_frames, ignore_index=True)
-    count = pd.concat(count_frames, ignore_index=True)
-    return occ, count
-
-
-def _aggregate_and_merge(
-    prepared: pd.DataFrame,
-    embeddings: pd.DataFrame,
-    pca_model: dict | None = None,
-) -> pd.DataFrame:
-    """Groupby → aggregate → merge embeddings → optional PCA apply."""
-    agg = aggregate_prepared_surveys(prepared)
-    merged = agg.merge(embeddings, left_on="bng_ref", right_index=True, how="inner")
-    if pca_model is not None:
-        merged = apply_embedding_pca(merged, pca_model)
-    return merged
+    return (
+        pd.concat(occ_frames, ignore_index=True),
+        pd.concat(count_frames, ignore_index=True),
+    )
 
 
 def fit_ensemble_trend(
-    harmonized: pd.DataFrame,
-    embeddings: pd.DataFrame,
+    df: pd.DataFrame,
     cfg: RunConfig,
     species: str,
     grid: pd.DataFrame,
     reference_effort: ReferenceEffort | None = None,
     n_ensemble: int = 25,
-    pca_model: dict | None = None,
     seed: int = 42,
 ) -> EnsembleTrendResult:
-    """Run an ensemble of two-part DML trend fits and aggregate at the grid.
+    """Run an ensemble of two-part DML trend fits over the assembled data.
 
     Parameters
     ----------
-    harmonized
-        Individual-level survey data (all years stacked).
-    embeddings
-        Geospatial embeddings indexed by ``bng_ref``.
+    df
+        Assembled analysis DataFrame (one row per cell-year) as returned by
+        ``assemble_analysis_data``, with embeddings and weather already
+        joined. PCA should already have been applied if ``cfg.n_pca_components``
+        is set.
     cfg
-        Run configuration (RF hyperparameters, PCA dimensionality).
+        Run configuration (RF hyperparameters).
     species
         Species column name.
     grid
@@ -119,27 +112,16 @@ def fit_ensemble_trend(
         columns are ignored — reference effort is broadcast instead.
     reference_effort
         Fixed effort values for SDM prediction. If ``None``, computed from
-        the first successful ensemble subsample's aggregation.
+        ``df``.
     n_ensemble
         Number of ensemble members.
-    pca_model
-        Fitted embedding PCA (as returned by ``reduce_embeddings_pca``). If
-        ``None`` and ``cfg.n_pca_components`` is set, a PCA is fit on the
-        first successful member and reused for all subsequent members.
     seed
-        Random seed.
+        Base random seed; member ``i`` uses ``seed + i``.
     """
     rng = np.random.default_rng(seed)
 
-    # Run the expensive BNG-assignment and coordinate-transform step once;
-    # per-member resampling happens on the prepared frame which only has to
-    # do a groupby.
-    prepared = prepare_surveys(harmonized)
-    logger.info(
-        "Prepared harmonized frame once: %d surveys across %d years",
-        len(prepared),
-        prepared["year"].nunique(),
-    )
+    if reference_effort is None:
+        reference_effort = compute_reference_effort(df)
 
     draws_occ: list[np.ndarray] = []
     draws_count: list[np.ndarray] = []
@@ -151,25 +133,9 @@ def fit_ensemble_trend(
     for i in range(n_ensemble):
         logger.info("Ensemble member %d/%d", i + 1, n_ensemble)
         try:
-            occ_prep, count_prep = _split_prepared(prepared, rng)
+            occ_df, count_df = split_cell_years(df, rng)
 
-            # Fit PCA on first successful member's aggregated occ frame if
-            # not supplied; reuse for count so both halves share feature
-            # space (avoids mixed raw + reduced embedding columns).
-            if pca_model is None and cfg.n_pca_components:
-                occ_df_raw = _aggregate_and_merge(occ_prep, embeddings, None)
-                occ_df, pca_model = reduce_embeddings_pca(
-                    occ_df_raw, cfg.n_pca_components
-                )
-                count_df = _aggregate_and_merge(count_prep, embeddings, pca_model)
-            else:
-                occ_df = _aggregate_and_merge(occ_prep, embeddings, pca_model)
-                count_df = _aggregate_and_merge(count_prep, embeddings, pca_model)
-
-            if reference_effort is None:
-                reference_effort = compute_reference_effort(occ_df)
-
-            prediction = train_predict_species(
+            result = train_predict_species(
                 occ_df,
                 count_df,
                 species=species,
@@ -178,6 +144,10 @@ def fit_ensemble_trend(
                 reference_effort=reference_effort,
                 seed=seed + i,
             )
+            # train_predict_species returns a plain SpeciesPrediction when
+            # return_models is False (the default).
+            assert isinstance(result, SpeciesPrediction)
+            prediction = result
 
             draws_occ.append(prediction.occ_ppy)
             draws_count.append(prediction.count_ppy)
@@ -190,9 +160,7 @@ def fit_ensemble_trend(
 
     n_ok = len(draws_abd)
     if n_ok < 3:
-        raise RuntimeError(
-            f"Only {n_ok}/{n_ensemble} ensemble members succeeded"
-        )
+        raise RuntimeError(f"Only {n_ok}/{n_ensemble} ensemble members succeeded")
     if prediction is None:
         raise RuntimeError("No ensemble member succeeded")
 
