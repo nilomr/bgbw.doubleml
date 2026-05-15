@@ -244,40 +244,7 @@ Ordered roughly by impact.
    participant-level "repeat surveyor" indicator derived from the harmonized
    data and aggregated to cells would be a meaningful improvement.
 
-4. **`ReferenceEffort` defaults are live until `compute_reference_effort` is
-   called.** [config.py:169](../src/bgbw_trends/config.py#L169) sets
-   `n_surveys=1.0`, `mean_observers=1.3`, etc. as hard-coded fallbacks.
-   The ensemble path ([ensemble.py:124](../src/bgbw_trends/trends/ensemble.py#L124))
-   and the prototype script both call `compute_reference_effort`. A new caller
-   who skips this step will get SDM maps derived from the wrong effort
-   reference without warning.
-
-5. **`config.SPATIAL_FEATURES_W` is dead code.**
-   [config.py:157](../src/bgbw_trends/config.py#L157) hard-codes `emb_0..63`,
-   but after PCA the columns are `emb_0..{k-1}`.
-   [make_spatial_features_W](../src/bgbw_trends/features/habitat.py#L201)
-   globs `emb_*` so the constant is never used. Delete it or wire it through
-   as the authoritative list.
-
-6. **`PROTOTYPE_SPECIES` is misleading.** `PROTOTYPE_SPECIES = ["blue_tit",
-   "house_sparrow"]` ([config.py:47](../src/bgbw_trends/config.py#L47))
-   exists alongside 74 species in `SPECIES_COLUMNS`, but the prototype script
-   configures its species list inline and doesn't use this constant. Either
-   remove it or make it the single source of truth for prototype runs.
-
-7. **`RunConfig.n_folds` and `RunConfig.n_rep` are dead code.**
-   [config.py:274](../src/bgbw_trends/config.py#L274) defines these fields
-   (defaults 5 and 5) and [console.py:230](../src/bgbw_trends/console.py#L230)
-   prints them as "DML folds: 5 × 5 reps", but `train_predict_species` never
-   reads them. They were added with the intent of implementing Chernozhukov
-   et al.'s repeated K-fold cross-fitting, which was never built. The nuisance
-   forests use sklearn OOB predictions instead — the direct Python equivalent
-   of what `grf::regression_forest` does internally (a single forest fit whose
-   per-sample predictions are debiased via honest/OOB splitting, not explicit
-   K-fold). The fields and the console line should be removed to avoid implying
-   that cross-fitting is configured and running.
-
-8. **`covariates_to_maximize` is not ported.** The reference implementation
+4. **`covariates_to_maximize` is not ported.** The reference implementation
    can condition SDM predictions on optimal detection conditions
    (`multivariate_maximize` in `trendswf`; Fink et al. 2023, §3.3).
    BGBW has no within-cell, within-year detection variation to draw from,
@@ -290,7 +257,7 @@ Ordered roughly by impact.
 Use §4 to decide the role, then:
 
 - **X_hab** → add to `make_habitat_features` in [features/habitat.py](../src/bgbw_trends/features/habitat.py#L144). Must be present in both training frame and prediction grid.
-- **X_effort** → add the column name to `EFFORT_FEATURES` in [config.py](../src/bgbw_trends/config.py#L133), add a field to `ReferenceEffort` ([config.py:169](../src/bgbw_trends/config.py#L169)), and `compute_reference_effort` picks it up automatically via `fields()`.
+- **X_effort** → add the column name to `EFFORT_FEATURES` in [config.py](../src/bgbw_trends/config.py#L133), add a field to `ReferenceEffort` ([config.py](../src/bgbw_trends/config.py)) (default `math.nan`), and `compute_reference_effort` picks it up automatically via `fields()`.
 - **W** → add to `make_spatial_features_W` in [features/habitat.py](../src/bgbw_trends/features/habitat.py#L201). Grid-only; not frozen.
 - **Observer-skill analogue** → add to X_effort but set its `ReferenceEffort` field **above the median** to represent a skilled-but-typical observer. The exact quantile to use is not pinned in the reference implementation (`prediction_unit` in `trendswf` is passed in externally).
 
@@ -333,6 +300,50 @@ is the most informative single diagnostic from a pipeline run. High R² (> 0.85)
 suggests the feature set is absorbing strong temporal confounding; near-zero
 R² means either little confounding in the data or a missing confounder. See the
 [User Guide §7](USER_GUIDE.md#7-diagnostics) for interpretation guidance.
+
+---
+
+## 7a. Parallelism and where the time goes
+
+A single `train_predict_species` call fits four nuisance forests
+(marginal × occurrence/count, propensity × occurrence/count) and two
+causal forests. Each individual fit is internally parallelised by
+sklearn / econml. The expensive *outer* loops are:
+
+- [`fit_ensemble_trend`](../src/bgbw_trends/trends/ensemble.py) — N
+  independent pipeline fits, one per 50/50 cell-year split.
+- [`diagnose_residual_confounding`](../src/bgbw_trends/trends/residual_confounding.py)
+  — N independent null-trend pipeline fits.
+
+**Recommended N**
+
+The reference implementations both use 100, but on this codebase a single
+sequential pipeline fit is ~30 min, so 100 of anything is a cluster job.
+
+| Setting        | Reference target | Stable CI | Smoke check (script default) |
+| -------------- | ---------------- | --------- | ---------------------------- |
+| Ensemble       | **100** (Fink 2023 §3.3 line 136; Johnston 2025 SM line 236) | ≥25 | 10 |
+| Null-trend sim | **100** (`n_mc <- 100` in `trendswf/vignettes/motivating-example.Rmd`) | ≥25 | 5 |
+
+The script defaults (10 / 5) are exploratory only — usable for "does this
+species look sensible", not for reported CIs or bias adjustments. Raise
+to ≥25 for a usable run and to 100 with `--n-workers` on a cluster
+node for a publication-grade run.
+
+Both honour `RunConfig.n_workers`:
+
+- `n_workers=1` (**default**) — sequential. Each fit gets all cores via
+  `inner_n_jobs=-1`. The right setting on a laptop or any single-node run
+  where RAM is constrained.
+- `n_workers>1` — process-level parallelism via `joblib(loky)`. Each
+  worker runs one full pipeline; `inner_n_jobs` is auto-throttled to
+  `cores // n_workers` (override with `RunConfig.inner_n_jobs > 0`).
+  Speedup is near-linear in workers; **RAM scales with `n_workers`**
+  because every worker holds its own copy of the dataframe — only enable
+  on a machine sized for it (cluster nodes, big workstations).
+
+CLI flags on `scripts/pipeline/run_prototype.py`:
+`--n-workers N --inner-n-jobs N --n-ensemble N --n-rc-sims N`.
 
 ---
 

@@ -147,8 +147,6 @@ def _run_pipeline(
         n_estimators=100,
         cf_n_estimators=400,
         cf_min_samples_leaf=10,
-        n_folds=3,
-        n_rep=1,
         n_pca_components=0,
     )
     return train_predict_species(
