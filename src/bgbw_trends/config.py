@@ -1,19 +1,46 @@
 """Configuration and paths for the BGBW trends pipeline."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 # ── Data paths ──────────────────────────────────────────────────────────────
+# All five paths can be overridden via environment variables.  The hard-coded
+# values below are the originating-machine defaults; they will be wrong on any
+# other host.  Set the corresponding env vars (e.g. in a shell rc file or a
+# wrapper script) before running the pipeline.
+#
+#   BGBW_HARMONIZED_DIR      — individual-level BGBW submissions (harmonized/)
+#   BGBW_BNG_SURVEYS_DIR     — cell-year aggregates (bng_surveys/)
+#   BGBW_AEF_DIR             — geospatial embedding parquets
+#   BGBW_WEATHER_PATH        — survey-weekend HadUK-Grid parquet
+#   BGBW_JANUARY_WEATHER_PATH — January HadUK-Grid parquet
 HARMONIZED_DIR = Path(
-    "/home/nilomr/projects/bgbw.data.pipeline-r/output/data/harmonized"
+    os.environ.get(
+        "BGBW_HARMONIZED_DIR",
+        "/home/nilomr/projects/bgbw.data.pipeline-r/output/data/harmonized",
+    )
 )
 BNG_SURVEYS_DIR = Path(
-    "/home/nilomr/projects/bgbw.data.pipeline-r/output/data/bng_surveys"
+    os.environ.get(
+        "BGBW_BNG_SURVEYS_DIR",
+        "/home/nilomr/projects/bgbw.data.pipeline-r/output/data/bng_surveys",
+    )
 )
-AEF_DIR = Path("/mnt/w/projects/BGBW/data/metadata/spatial/aef")
-WEATHER_PATH = Path("/mnt/w/projects/BGBW/data/metadata/weather/bgbw_weather.parquet")
+AEF_DIR = Path(
+    os.environ.get("BGBW_AEF_DIR", "/mnt/w/projects/BGBW/data/metadata/spatial/aef")
+)
+WEATHER_PATH = Path(
+    os.environ.get(
+        "BGBW_WEATHER_PATH",
+        "/mnt/w/projects/BGBW/data/metadata/weather/bgbw_weather.parquet",
+    )
+)
 JANUARY_WEATHER_PATH = Path(
-    "/mnt/w/projects/BGBW/data/metadata/weather/bgbw_january_weather.parquet"
+    os.environ.get(
+        "BGBW_JANUARY_WEATHER_PATH",
+        "/mnt/w/projects/BGBW/data/metadata/weather/bgbw_january_weather.parquet",
+    )
 )
 
 # ── Species ─────────────────────────────────────────────────────────────────
