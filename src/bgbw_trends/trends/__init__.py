@@ -16,11 +16,16 @@ from bgbw_trends.trends.residual_confounding import (
     diagnose_residual_confounding,
     ResidualConfoundingResult,
 )
-from bgbw_trends.trends.ensemble import fit_ensemble_trend, EnsembleTrendResult
+from bgbw_trends.trends.ensemble import (
+    fit_ensemble_trend,
+    split_cell_years,
+    EnsembleTrendResult,
+)
 
 __all__ = [
     "diagnose_residual_confounding",
     "ResidualConfoundingResult",
     "fit_ensemble_trend",
+    "split_cell_years",
     "EnsembleTrendResult",
 ]
