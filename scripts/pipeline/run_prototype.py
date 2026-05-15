@@ -40,11 +40,7 @@ from bgbw_trends.console import (
     setup_rich_logging,
     timed_step,
 )
-from bgbw_trends.data import (
-    assemble_analysis_data,
-    assemble_harmonized_data,
-    load_mean_embeddings,
-)
+from bgbw_trends.data import assemble_analysis_data
 from bgbw_trends.features.effort import compute_reference_effort
 from bgbw_trends.features.habitat import reduce_embeddings_pca
 from bgbw_trends.interpret import (
@@ -63,6 +59,7 @@ from bgbw_trends.plotting import (
 from bgbw_trends.trends import (
     diagnose_residual_confounding,
     fit_ensemble_trend,
+    split_cell_years,
 )
 
 setup_rich_logging(logging.INFO)
@@ -74,6 +71,31 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--species",
+        nargs="+",
+        metavar="SPECIES",
+        default=None,
+        help=(
+            "One or more species to process (e.g. --species blackcap robin). "
+            "Defaults to the list hard-coded in this script."
+        ),
+    )
+    parser.add_argument(
+        "--years",
+        nargs="+",
+        type=int,
+        metavar="YEAR",
+        default=None,
+        help=("Years to include (e.g. --years 2017 2018 2019). Defaults to 2017–2024."),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Root output directory. Defaults to output/prototype.",
     )
     return parser.parse_args()
 
@@ -87,39 +109,21 @@ def _build_grid(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _subsample_by_year(
-    df: pd.DataFrame,
-    fraction: float,
-    rng: np.random.Generator,
-) -> pd.DataFrame:
-    """Stratified-by-year subsample of aggregated cell-year rows.
-
-    Johnston §3.4: the occurrence and count halves of the hurdle must be
-    fit on *independent* draws so the chain-rule sum is unbiased.
-    """
-    frames = []
-    for _year, group in df.groupby("year"):
-        n_sample = max(1, int(len(group) * fraction))
-        idx = rng.choice(group.index, size=n_sample, replace=False)
-        frames.append(group.loc[idx])
-    return pd.concat(frames, ignore_index=True)
-
-
 def main() -> None:
-    _parse_args()
+    args = _parse_args()
 
     # ── Configuration ───────────────────────────────────────────────────
     run_ensemble = True  # slow — set True for uncertainty quantification
 
     cfg = RunConfig(
-        species=["blackcap"],
-        years=list(range(2017, 2025, 1)),
-        output_dir=Path("output/prototype"),
+        species=args.species or ["blackbird"],
+        years=args.years or list(range(2017, 2025, 2)),
+        output_dir=args.output_dir or Path("output/prototype"),
         n_folds=5,
-        n_rep=4,
-        n_pca_components=30,
-        n_estimators=700,
-        cf_n_estimators=700,
+        n_rep=5,
+        n_pca_components=15,
+        n_estimators=300,
+        cf_n_estimators=300,
         cf_min_samples_leaf=50,
     )
     out = cfg.output_paths()
@@ -169,10 +173,7 @@ def main() -> None:
     )
 
     # ── Two-part DML trend + SDM (Fink §3.2) ────────────────────────────
-    # Quick prototype only — NOT the correct ensemble path (see ensemble.py).
-    # Two independent 75% draws of already-aggregated cell-year rows overlap
-    # ~56% by construction; within shared cells the statistics are identical,
-    # so hurdle independence is nominal. Use fit_ensemble_trend for inference.
+    # Prototype path — Use fit_ensemble_trend for final trend inference.
     section("Two-part DML trend + SDM")
     console.print()
     predictions = {}
@@ -182,8 +183,7 @@ def main() -> None:
         task = prog.add_task("train_predict_species", total=len(cfg.species))
         for sp in cfg.species:
             prog.update(task, description=f"train_predict_species  [{sp}]")
-            df_occ = _subsample_by_year(df, 0.75, rng)
-            df_count = _subsample_by_year(df, 0.75, rng)
+            df_occ, df_count = split_cell_years(df, rng)
             pred, models = train_predict_species(
                 df_occ,
                 df_count,
@@ -366,7 +366,7 @@ def main() -> None:
     else:
         n_ensemble = 10
         console.print(
-            f"  [dim]{n_ensemble} members  •  subsample fraction 0.75  •  "
+            f"  [dim]{n_ensemble} members  •  50/50 cell-year split  •  "
             f"independent occ/count draws[/dim]"
         )
         console.print()
@@ -375,17 +375,13 @@ def main() -> None:
                 f"Ensemble fitting [{cfg.species[0]}]  ({n_ensemble} members)",
                 total=None,
             )
-            harmonized = assemble_harmonized_data(cfg)
-            embeddings = load_mean_embeddings(cfg.embedding_years)
             ens = fit_ensemble_trend(
-                harmonized=harmonized,
-                embeddings=embeddings,
+                df=df,
                 cfg=cfg,
                 species=cfg.species[0],
                 grid=grid,
                 reference_effort=cfg.reference_effort,
                 n_ensemble=n_ensemble,
-                pca_model=embedding_pca,
             )
         ensemble_path = out.species_ensemble_file(cfg.species[0])
         ensemble_path.parent.mkdir(parents=True, exist_ok=True)
