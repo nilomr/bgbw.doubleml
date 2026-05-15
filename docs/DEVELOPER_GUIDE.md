@@ -78,7 +78,7 @@ Per-year embeddings would require:
 4. **`embedding_years`** in [`RunConfig`](../src/bgbw_trends/config.py#L234)
    is already `list[int] | None` — repurpose from "years to average over" to
    "years to load".
-5. **Grid prediction**: [_build_grid](../scripts/pipeline/run_prototype.py#L81)
+5. **Grid prediction**: [_build_grid](../scripts/pipeline/run_prototype.py#L103)
    takes the most recent row per `bng_ref`, which is appropriate for a
    current-distribution map. Per-year distribution maps would need the grid
    filtered to the target year.
@@ -224,7 +224,7 @@ confounders — which they would already handle if included in X_hab.
 
 Ordered roughly by impact.
 
-1. **Embeddings are not per-year** ([data.py:340](../src/bgbw_trends/data.py#L340)).
+1. **Embeddings are not per-year** ([data.py:127](../src/bgbw_trends/data.py#L127)).
    See §3.1. The current model uses a multi-year mean rather than year-specific
    embeddings, which reduces sensitivity to any one year's artefacts but keeps
    each cell's representation fixed across the study period.
@@ -247,7 +247,7 @@ Ordered roughly by impact.
 4. **`ReferenceEffort` defaults are live until `compute_reference_effort` is
    called.** [config.py:169](../src/bgbw_trends/config.py#L169) sets
    `n_surveys=1.0`, `mean_observers=1.3`, etc. as hard-coded fallbacks.
-   The ensemble path ([ensemble.py:170](../src/bgbw_trends/trends/ensemble.py#L170))
+   The ensemble path ([ensemble.py:124](../src/bgbw_trends/trends/ensemble.py#L124))
    and the prototype script both call `compute_reference_effort`. A new caller
    who skips this step will get SDM maps derived from the wrong effort
    reference without warning.
@@ -260,13 +260,13 @@ Ordered roughly by impact.
    as the authoritative list.
 
 6. **`PROTOTYPE_SPECIES` is misleading.** `PROTOTYPE_SPECIES = ["blue_tit",
-   "house_sparrow"]` ([config.py:20](../src/bgbw_trends/config.py#L20))
+   "house_sparrow"]` ([config.py:47](../src/bgbw_trends/config.py#L47))
    exists alongside 74 species in `SPECIES_COLUMNS`, but the prototype script
    configures its species list inline and doesn't use this constant. Either
    remove it or make it the single source of truth for prototype runs.
 
 7. **`RunConfig.n_folds` and `RunConfig.n_rep` are dead code.**
-   [config.py:247](../src/bgbw_trends/config.py#L247) defines these fields
+   [config.py:274](../src/bgbw_trends/config.py#L274) defines these fields
    (defaults 5 and 5) and [console.py:230](../src/bgbw_trends/console.py#L230)
    prints them as "DML folds: 5 × 5 reps", but `train_predict_species` never
    reads them. They were added with the intent of implementing Chernozhukov

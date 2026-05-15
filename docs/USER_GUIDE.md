@@ -37,7 +37,7 @@ export BGBW_JANUARY_WEATHER_PATH=/data/bgbw/weather/bgbw_january_weather.parquet
 ## 2. Configuration
 
 All run parameters live in `RunConfig`
-([config.py:234](../src/bgbw_trends/config.py#L234)):
+([config.py:261](../src/bgbw_trends/config.py#L261)):
 
 ```python
 from bgbw_trends.config import RunConfig
@@ -91,14 +91,13 @@ diagnostic for the first species in `cfg.species`, and optionally runs an
 ensemble for uncertainty quantification for that same first species
 (controlled by `run_ensemble = True/False` near the top of the script).
 
-**Note on hurdle independence.** The prototype draws two independent 75%
-subsamples to split occurrence and count training data. The draws are
-independent rather than mutually exclusive, so they overlap in expectation;
-within shared cells the aggregated statistics are identical, and the chain-rule
-combination is therefore only nominally independent. For published results,
-use `fit_ensemble_trend` from
-[`trends/ensemble.py`](../src/bgbw_trends/trends/ensemble.py), which applies
-proper non-overlapping 50/50 stratified splits.
+**Note on hurdle independence.** The prototype splits training data into two
+non-overlapping 50/50 stratified halves via `split_cell_years` — one for the
+occurrence stage, one for the count stage — so the chain-rule combination
+(`abd_ppy = τ_occ/P(occ) + τ_count`) is based on genuinely independent
+estimates. For published uncertainty quantification use `fit_ensemble_trend`
+from [`trends/ensemble.py`](../src/bgbw_trends/trends/ensemble.py), which
+repeats this split across multiple ensemble members.
 
 ### Map products
 
@@ -181,7 +180,7 @@ Two things to watch for:
 
 ## 6. Extending the time series
 
-The prototype runs 2017–2024. To extend:
+The prototype defaults to every other year (2017, 2019, 2021, 2023) for speed; pass `--years 2017 2018 … 2024` for the full run. To extend the time series:
 
 1. Produce harmonized and BNG-aggregated parquets for the new year(s) using
    the data pipeline repo and place them in `HARMONIZED_DIR` and
