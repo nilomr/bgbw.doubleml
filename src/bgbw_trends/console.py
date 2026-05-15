@@ -227,8 +227,8 @@ def print_config_panel(cfg: object, run_ensemble: bool) -> None:
         f"[dim]Species:[/dim]       {', '.join(cfg.species)}",  # type: ignore[attr-defined]
         f"[dim]Years:[/dim]         {cfg.years[0]}-{cfg.years[-1]}",  # type: ignore[attr-defined]
         f"[dim]PCA components:[/dim] {cfg.n_pca_components} per stat group",  # type: ignore[attr-defined]
-        f"[dim]DML folds:[/dim]     {cfg.n_folds} x {cfg.n_rep} reps",  # type: ignore[attr-defined]
         f"[dim]RF estimators:[/dim] {cfg.n_estimators} (nuisance)  {cfg.cf_n_estimators} (causal forest)",  # type: ignore[attr-defined]
+        f"[dim]Parallelism:[/dim]   {cfg.n_workers} worker(s)  •  inner_n_jobs={cfg.inner_n_jobs}",  # type: ignore[attr-defined]
         f"[dim]Ensemble:[/dim]      {'enabled' if run_ensemble else 'disabled'}",
     ]
     console.print(Panel("\n".join(lines), title="[step]Configuration[/step]", expand=False))

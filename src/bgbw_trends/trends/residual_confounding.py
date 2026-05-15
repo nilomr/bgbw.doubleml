@@ -28,7 +28,7 @@ what we ship).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -40,6 +40,7 @@ from bgbw_trends.pipeline import (
     _predict,
     train_predict_species,
 )
+from bgbw_trends.trends.ensemble import _resolve_inner_n_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,49 @@ def _null_species_values(
     return count_null
 
 
+def _one_null_simulation(
+    df: pd.DataFrame,
+    species: str,
+    cfg: RunConfig,
+    grid: pd.DataFrame,
+    reference_effort: ReferenceEffort,
+    sim_idx: int,
+    sim_seed: int,
+) -> tuple[float, float] | None:
+    """Run one null-trend simulation. Top-level so workers can pickle it."""
+    rng = np.random.default_rng(sim_seed)
+    years = df["year"].to_numpy()
+    unique_years = np.unique(years)
+
+    # Step 1 — resample stratified by year, with replacement. Preserves the
+    # joint distribution of features within each year, including the
+    # interannual drift that drives the confounding.
+    pieces = [
+        rng.choice(np.where(years == y)[0], size=int((years == y).sum()), replace=True)
+        for y in unique_years
+    ]
+    boot_idx = np.concatenate(pieces)
+    null_df = df.iloc[boot_idx].reset_index(drop=True)
+
+    # Steps 2–3 — regenerate the species column under a zero-trend DGP.
+    null_df[species] = _null_species_values(null_df, species, cfg, rng)
+
+    try:
+        pred = train_predict_species(
+            null_df,
+            null_df,
+            species=species,
+            cfg=cfg,
+            grid=grid,
+            reference_effort=reference_effort,
+            seed=int(rng.integers(0, 2**31)),
+        )
+    except Exception as e:  # noqa: BLE001 — isolate failing sims
+        logger.warning("Null simulation %d failed: %s", sim_idx, e)
+        return None
+    return float(pred.ate_occ), float(pred.ate_count)
+
+
 def diagnose_residual_confounding(
     df: pd.DataFrame,
     *,
@@ -127,6 +171,9 @@ def diagnose_residual_confounding(
     seed: int = 0,
 ) -> ResidualConfoundingResult:
     """Run the null-trend simulation (Fink vignette §2.2).
+
+    Simulations run in parallel when ``cfg.n_workers > 1`` (one process per
+    worker, inner-forest threading throttled to keep CPU use balanced).
 
     Parameters
     ----------
@@ -140,48 +187,48 @@ def diagnose_residual_confounding(
         Passed through to ``train_predict_species``.
     n_simulations : int
         Number of null-trend simulations. Each fits the full two-part
-        pipeline, so cost scales linearly.
+        pipeline, so cost scales linearly (and divides by ``n_workers``
+        when run in parallel).
     seed : int
         RNG seed.
     """
-    rng = np.random.default_rng(seed)
-    years = df["year"].to_numpy()
-    unique_years = np.unique(years)
+    seed_seq = np.random.SeedSequence(seed)
+    child_seeds = seed_seq.spawn(n_simulations)
 
-    sim_occ: list[float] = []
-    sim_count: list[float] = []
+    worker_cfg = replace(cfg, inner_n_jobs=_resolve_inner_n_jobs(cfg))
 
-    for i in range(n_simulations):
-        # Step 1 — resample stratified by year, with replacement.
-        # Preserves the joint distribution of features *within* each year,
-        # including the interannual drift that drives the confounding.
-        pieces = [
-            rng.choice(np.where(years == y)[0], size=int((years == y).sum()), replace=True)
-            for y in unique_years
-        ]
-        boot_idx = np.concatenate(pieces)
-        null_df = df.iloc[boot_idx].reset_index(drop=True)
+    jobs = [
+        (
+            df,
+            species,
+            worker_cfg,
+            grid,
+            reference_effort,
+            i,
+            int(child_seeds[i].generate_state(1)[0]),
+        )
+        for i in range(n_simulations)
+    ]
 
-        # Steps 2–3 — regenerate the species column under a zero-trend DGP.
-        null_df[species] = _null_species_values(null_df, species, cfg, rng)
+    n_workers = max(1, cfg.n_workers)
+    if n_workers == 1:
+        results = [_one_null_simulation(*args) for args in jobs]
+    else:
+        from joblib import Parallel, delayed
 
-        # Step 4 — run the real pipeline on the null data.
-        try:
-            pred = train_predict_species(
-                null_df,
-                null_df,
-                species=species,
-                cfg=cfg,
-                grid=grid,
-                reference_effort=reference_effort,
-                seed=int(rng.integers(0, 2**31)),
-            )
-        except Exception as e:
-            logger.warning("Null simulation %d failed: %s", i, e)
-            continue
+        logger.info(
+            "Residual-confounding sims: %d  •  %d parallel workers  •  "
+            "inner_n_jobs=%d",
+            n_simulations,
+            n_workers,
+            worker_cfg.inner_n_jobs,
+        )
+        results = Parallel(n_jobs=n_workers, backend="loky", verbose=0)(
+            delayed(_one_null_simulation)(*args) for args in jobs
+        )
 
-        sim_occ.append(float(pred.ate_occ))
-        sim_count.append(float(pred.ate_count))
+    sim_occ = [r[0] for r in results if r is not None]
+    sim_count = [r[1] for r in results if r is not None]
 
     sim_occ_arr = np.asarray(sim_occ, dtype=np.float64)
     sim_count_arr = np.asarray(sim_count, dtype=np.float64)

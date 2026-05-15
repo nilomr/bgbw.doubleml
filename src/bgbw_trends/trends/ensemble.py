@@ -13,12 +13,22 @@ aggregated statistics while still guaranteeing hurdle independence for the DML a
 
 Grid-cell point estimates are medians across members; 80% CIs use the
 10th/90th percentiles.
+
+Parallelism
+-----------
+When ``cfg.n_workers > 1`` ensemble members run in parallel via
+``joblib`` (``loky`` backend, one process per worker). Each worker owns a
+single pipeline fit, and inner forest threading is throttled to
+``cfg.inner_n_jobs`` so we don't oversubscribe CPUs. RAM scales with
+``n_workers`` because each worker holds its own copy of the dataframe;
+size the cluster job accordingly.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -85,6 +95,64 @@ def split_cell_years(
     )
 
 
+# ── Worker ────────────────────────────────────────────────────────────────
+
+
+def _resolve_inner_n_jobs(cfg: RunConfig) -> int:
+    """When running an outer process pool, throttle inner threading.
+
+    -1 from cfg means "use all cores", but with ``n_workers > 1`` that
+    over-subscribes the machine. We divide the available cores across
+    workers and keep at least one thread per worker.
+    """
+    if cfg.n_workers <= 1:
+        return cfg.inner_n_jobs
+    if cfg.inner_n_jobs > 0:
+        return cfg.inner_n_jobs
+    cpus = os.cpu_count() or 1
+    return max(1, cpus // max(cfg.n_workers, 1))
+
+
+def _ensemble_member(
+    df: pd.DataFrame,
+    cfg: RunConfig,
+    species: str,
+    grid: pd.DataFrame,
+    reference_effort: ReferenceEffort,
+    member_idx: int,
+    split_seed: int,
+    fit_seed: int,
+) -> dict | None:
+    """Fit one ensemble member; return the per-member arrays or None on failure.
+
+    Top-level (not nested) so it pickles cleanly for ``loky`` workers.
+    """
+    try:
+        rng = np.random.default_rng(split_seed)
+        occ_df, count_df = split_cell_years(df, rng)
+        result = train_predict_species(
+            occ_df,
+            count_df,
+            species=species,
+            cfg=cfg,
+            grid=grid,
+            reference_effort=reference_effort,
+            seed=fit_seed,
+        )
+        assert isinstance(result, SpeciesPrediction)
+        return {
+            "bng_ref": result.bng_ref,
+            "occ_ppy": result.occ_ppy,
+            "count_ppy": result.count_ppy,
+            "abd_ppy": result.abd_ppy,
+            "p_occurrence": result.p_occurrence,
+            "e_abundance": result.e_abundance,
+        }
+    except Exception as e:  # noqa: BLE001 — isolate failing members
+        logger.warning("Ensemble member %d failed: %s", member_idx + 1, e)
+        return None
+
+
 def fit_ensemble_trend(
     df: pd.DataFrame,
     cfg: RunConfig,
@@ -96,6 +164,8 @@ def fit_ensemble_trend(
 ) -> EnsembleTrendResult:
     """Run an ensemble of two-part DML trend fits over the assembled data.
 
+    Members are independent and run in parallel when ``cfg.n_workers > 1``.
+
     Parameters
     ----------
     df
@@ -104,7 +174,7 @@ def fit_ensemble_trend(
         joined. PCA should already have been applied if ``cfg.n_pca_components``
         is set.
     cfg
-        Run configuration (RF hyperparameters).
+        Run configuration (RF hyperparameters and parallelism settings).
     species
         Species column name.
     grid
@@ -118,57 +188,62 @@ def fit_ensemble_trend(
     seed
         Base random seed; member ``i`` uses ``seed + i``.
     """
-    rng = np.random.default_rng(seed)
-
     if reference_effort is None:
         reference_effort = compute_reference_effort(df)
 
-    draws_occ: list[np.ndarray] = []
-    draws_count: list[np.ndarray] = []
-    draws_abd: list[np.ndarray] = []
-    p_occ_stack: list[np.ndarray] = []
-    e_abund_stack: list[np.ndarray] = []
+    # Pre-generate the per-member seeds in the parent so worker order does
+    # not affect reproducibility of any individual member.
+    seed_seq = np.random.SeedSequence(seed)
+    child_seeds = seed_seq.spawn(n_ensemble)
 
-    prediction: SpeciesPrediction | None = None
-    for i in range(n_ensemble):
-        logger.info("Ensemble member %d/%d", i + 1, n_ensemble)
-        try:
-            occ_df, count_df = split_cell_years(df, rng)
+    # Throttle inner-forest threading so ``n_workers`` parallel processes
+    # don't oversubscribe the machine.
+    worker_cfg = replace(cfg, inner_n_jobs=_resolve_inner_n_jobs(cfg))
 
-            result = train_predict_species(
-                occ_df,
-                count_df,
-                species=species,
-                cfg=cfg,
-                grid=grid,
-                reference_effort=reference_effort,
-                seed=seed + i,
-            )
-            # train_predict_species returns a plain SpeciesPrediction when
-            # return_models is False (the default).
-            assert isinstance(result, SpeciesPrediction)
-            prediction = result
+    jobs = [
+        (
+            df,
+            worker_cfg,
+            species,
+            grid,
+            reference_effort,
+            i,
+            int(child_seeds[i].generate_state(1)[0]),
+            seed + i,
+        )
+        for i in range(n_ensemble)
+    ]
 
-            draws_occ.append(prediction.occ_ppy)
-            draws_count.append(prediction.count_ppy)
-            draws_abd.append(prediction.abd_ppy)
-            p_occ_stack.append(prediction.p_occurrence)
-            e_abund_stack.append(prediction.e_abundance)
-        except Exception as e:  # noqa: BLE001 — isolate failing members
-            logger.warning("Ensemble member %d failed: %s", i + 1, e)
-            continue
+    n_workers = max(1, cfg.n_workers)
+    if n_workers == 1:
+        results = []
+        for args in jobs:
+            logger.info("Ensemble member %d/%d", args[5] + 1, n_ensemble)
+            results.append(_ensemble_member(*args))
+    else:
+        from joblib import Parallel, delayed
 
-    n_ok = len(draws_abd)
+        logger.info(
+            "Ensemble: %d members  •  %d parallel workers  •  inner_n_jobs=%d",
+            n_ensemble,
+            n_workers,
+            worker_cfg.inner_n_jobs,
+        )
+        results = Parallel(n_jobs=n_workers, backend="loky", verbose=0)(
+            delayed(_ensemble_member)(*args) for args in jobs
+        )
+
+    successful = [r for r in results if r is not None]
+    n_ok = len(successful)
     if n_ok < 3:
         raise RuntimeError(f"Only {n_ok}/{n_ensemble} ensemble members succeeded")
-    if prediction is None:
-        raise RuntimeError("No ensemble member succeeded")
 
-    occ_arr = np.vstack(draws_occ)
-    count_arr = np.vstack(draws_count)
-    abd_arr = np.vstack(draws_abd)
-    p_occ_arr = np.vstack(p_occ_stack)
-    e_abund_arr = np.vstack(e_abund_stack)
+    bng_ref = successful[0]["bng_ref"]
+    occ_arr = np.vstack([r["occ_ppy"] for r in successful])
+    count_arr = np.vstack([r["count_ppy"] for r in successful])
+    abd_arr = np.vstack([r["abd_ppy"] for r in successful])
+    p_occ_arr = np.vstack([r["p_occurrence"] for r in successful])
+    e_abund_arr = np.vstack([r["e_abundance"] for r in successful])
 
     logger.info(
         "Ensemble complete: %d/%d members. grid-median abd_ppy=%+.3f%% "
@@ -182,7 +257,7 @@ def fit_ensemble_trend(
 
     return EnsembleTrendResult(
         species=species,
-        bng_ref=prediction.bng_ref,
+        bng_ref=bng_ref,
         p_occurrence=np.nanmedian(p_occ_arr, axis=0),
         e_abundance=np.nanmedian(e_abund_arr, axis=0),
         occ_ppy=np.nanmedian(occ_arr, axis=0),

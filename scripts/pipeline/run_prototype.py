@@ -97,6 +97,58 @@ def _parse_args() -> argparse.Namespace:
         metavar="DIR",
         help="Root output directory. Defaults to output/prototype.",
     )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Outer process-level workers for the ensemble and residual-"
+            "confounding loops. 1 = sequential. On a cluster node, set to "
+            "the number of pipeline replicas you can run concurrently."
+        ),
+    )
+    parser.add_argument(
+        "--inner-n-jobs",
+        type=int,
+        default=-1,
+        metavar="N",
+        help=(
+            "Threads per individual RF / CausalForest fit. -1 = all cores "
+            "(default). When --n-workers > 1, this is auto-capped to "
+            "cores // n_workers to avoid CPU oversubscription unless an "
+            "explicit positive value is given."
+        ),
+    )
+    parser.add_argument(
+        "--n-ensemble",
+        type=int,
+        default=10,
+        metavar="N",
+        help=(
+            "Ensemble members for trend uncertainty. Default 10 — tractable "
+            "on a single machine, but only an exploratory CI. Fink et al. "
+            "(2023) and Johnston et al. (2025) both use 100; raise to ≥25 "
+            "for a usable percentile CI and to 100 with --n-workers on a "
+            "cluster for publication-grade uncertainty."
+        ),
+    )
+    parser.add_argument(
+        "--n-rc-sims",
+        type=int,
+        default=5,
+        metavar="N",
+        help=(
+            "Null-trend simulations for residual confounding. Default 5 — "
+            "a smoke check. The trendswf vignette uses 100; ≥25 gives a "
+            "stable bias estimate. Each sim fits the full pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--no-ensemble",
+        action="store_true",
+        help="Skip the ensemble step (uncertainty quantification).",
+    )
     return parser.parse_args()
 
 
@@ -113,18 +165,18 @@ def main() -> None:
     args = _parse_args()
 
     # ── Configuration ───────────────────────────────────────────────────
-    run_ensemble = True  # slow — set True for uncertainty quantification
+    run_ensemble = not args.no_ensemble
 
     cfg = RunConfig(
         species=args.species or ["blackbird"],
         years=args.years or list(range(2017, 2025, 2)),
         output_dir=args.output_dir or Path("output/prototype"),
-        n_folds=5,
-        n_rep=5,
         n_pca_components=15,
         n_estimators=300,
         cf_n_estimators=300,
         cf_min_samples_leaf=50,
+        n_workers=args.n_workers,
+        inner_n_jobs=args.inner_n_jobs,
     )
     out = cfg.output_paths()
 
@@ -343,7 +395,7 @@ def main() -> None:
     # ── Residual confounding diagnostic ─────────────────────────────────
     section("Residual confounding diagnostic")
     console.print()
-    n_rc = 5
+    n_rc = args.n_rc_sims
     with make_spinner() as spin:
         spin.add_task(
             f"Null-trend simulation [{cfg.species[0]}]  (n_simulations={n_rc})",
@@ -364,7 +416,7 @@ def main() -> None:
     if not run_ensemble:
         console.print("  [dim]skipped (run_ensemble=False)[/dim]")
     else:
-        n_ensemble = 10
+        n_ensemble = args.n_ensemble
         console.print(
             f"  [dim]{n_ensemble} members  •  50/50 cell-year split  •  "
             f"independent occ/count draws[/dim]"

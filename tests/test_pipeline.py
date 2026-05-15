@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from bgbw_trends.config import ReferenceEffort, RunConfig
+from bgbw_trends.features.effort import compute_reference_effort
 from bgbw_trends.pipeline import (
     SpeciesModelDiagnostics,
     SpeciesPrediction,
@@ -66,8 +67,6 @@ def small_run():
         n_estimators=40,
         cf_n_estimators=40,
         cf_min_samples_leaf=5,
-        n_folds=3,
-        n_rep=1,
         n_pca_components=0,
     )
     pred = train_predict_species(
@@ -76,7 +75,7 @@ def small_run():
         species="blue_tit",
         cfg=cfg,
         grid=grid,
-        reference_effort=ReferenceEffort(),
+        reference_effort=compute_reference_effort(df),
         seed=0,
     )
     return df, grid, pred

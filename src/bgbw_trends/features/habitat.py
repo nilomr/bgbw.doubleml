@@ -194,7 +194,7 @@ def make_habitat_features(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("No habitat features could be constructed")
 
     result = pd.concat(parts, axis=1)
-    logger.info("Habitat features (X_hab): %d features", result.shape[1])
+    logger.debug("Habitat features (X_hab): %d features", result.shape[1])
     return result
 
 
@@ -218,5 +218,5 @@ def make_spatial_features_W(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("No spatial features found for W")
 
     result = pd.concat(parts, axis=1)
-    logger.info("Spatial features (W): %d features", result.shape[1])
+    logger.debug("Spatial features (W): %d features", result.shape[1])
     return result

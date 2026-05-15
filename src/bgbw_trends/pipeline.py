@@ -106,6 +106,10 @@ def _make_rf(cfg: RunConfig):
     predictions are enabled so the full-data fit immediately exposes
     out-of-bag estimates, matching grf's native OOB behaviour — 1 fit
     per nuisance, no separate K-fold cross-fit required.
+
+    ``cfg.inner_n_jobs`` controls per-fit threading. Use 1 when an outer
+    process pool (ensemble / residual-confounding) already saturates
+    the machine, to avoid CPU oversubscription.
     """
     return _RF(
         n_estimators=cfg.n_estimators,
@@ -113,7 +117,7 @@ def _make_rf(cfg: RunConfig):
         max_features="sqrt",
         bootstrap=True,
         oob_score=True,
-        n_jobs=-1,
+        n_jobs=cfg.inner_n_jobs,
     )
 
 
@@ -168,7 +172,14 @@ def _build_prediction_effort(
     out = {}
     for col in training_effort.columns:
         if hasattr(reference, col):
-            out[col] = np.full(n, float(getattr(reference, col)), dtype=np.float64)
+            val = float(getattr(reference, col))
+            if not np.isfinite(val):
+                raise ValueError(
+                    f"ReferenceEffort.{col} is unset (NaN). Call "
+                    "compute_reference_effort(df) before fitting the pipeline, "
+                    f"or construct ReferenceEffort with an explicit {col} value."
+                )
+            out[col] = np.full(n, val, dtype=np.float64)
         else:
             out[col] = np.full(
                 n, float(training_effort[col].median()), dtype=np.float64
@@ -426,7 +437,7 @@ def train_predict_species(
         honest=True,
         inference=True,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=cfg.inner_n_jobs,
     )
     bin_cf.fit(X=W_occ, T=(T_occ - W_bin_hat), y=(Y_bin - Y_bin_hat))
 
@@ -456,17 +467,20 @@ def train_predict_species(
     y_count_forest, Y_count_hat = _fit_nuisance(X_marg_count, Y_log, cfg, seed=seed + 2)
     _, W_count_hat = _fit_nuisance(X_prop_count, T_count, cfg, seed=seed + 3)
 
+    count_r2, count_rmse = _r2_rmse(Y_log, Y_count_hat)
+    prop_occ_r2, prop_occ_rmse = _r2_rmse(T_occ, W_bin_hat)
+    prop_count_r2, prop_count_rmse = _r2_rmse(T_count, W_count_hat)
     diagnostics = SpeciesModelDiagnostics(
         occurrence_brier=float(brier_score_loss(Y_bin, Y_bin_hat)),
         occurrence_auc=_safe_roc_auc(Y_bin, Y_bin_hat),
         occurrence_pr_auc=_safe_pr_auc(Y_bin, Y_bin_hat),
-        count_r2=_r2_rmse(Y_log, Y_count_hat)[0],
-        count_rmse=_r2_rmse(Y_log, Y_count_hat)[1],
+        count_r2=count_r2,
+        count_rmse=count_rmse,
         count_mae=float(mean_absolute_error(Y_log, Y_count_hat)),
-        propensity_occ_r2=_r2_rmse(T_occ, W_bin_hat)[0],
-        propensity_occ_rmse=_r2_rmse(T_occ, W_bin_hat)[1],
-        propensity_count_r2=_r2_rmse(T_count, W_count_hat)[0],
-        propensity_count_rmse=_r2_rmse(T_count, W_count_hat)[1],
+        propensity_occ_r2=prop_occ_r2,
+        propensity_occ_rmse=prop_occ_rmse,
+        propensity_count_r2=prop_count_r2,
+        propensity_count_rmse=prop_count_rmse,
     )
 
     count_cf = CausalForest(
@@ -475,7 +489,7 @@ def train_predict_species(
         honest=True,
         inference=True,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=cfg.inner_n_jobs,
     )
     count_cf.fit(X=W_count, T=(T_count - W_count_hat), y=(Y_log - Y_count_hat))
 

@@ -44,11 +44,11 @@ def make_effort_features(df: pd.DataFrame) -> pd.DataFrame:
     n_nan = result.isna().sum().sum()
     if n_nan > 0:
         result = result.fillna(result.median())
-        logger.info(
+        logger.debug(
             "Filled %d NaN values in effort features with column medians", n_nan
         )
 
-    logger.info("Effort features (X_effort): %s", list(result.columns))
+    logger.debug("Effort features (X_effort): %s", list(result.columns))
     return result
 
 
