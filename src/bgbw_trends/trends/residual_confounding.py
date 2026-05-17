@@ -15,9 +15,10 @@ adapted for the BGBW two-part pipeline:
    Bernoulli draw from the fitted occurrence probabilities, and
    per-detection log-counts via a parametric bootstrap with residual
    SD (vignette L319-320).
-4. Refit the full two-part pipeline ``train_predict_species`` on the
-   null data. Any non-zero ``ate_occ`` / ``ate_count`` is residual
-   confounding the propensity model did not absorb.
+4. Split the null data 50/50 stratified by year (matching the ensemble
+   exactly) and refit ``train_predict_species``. Any non-zero
+   ``ate_occ`` / ``ate_count`` is residual confounding the propensity
+   model did not absorb.
 
 This matches exactly the vignette's §2.2 workflow: same diagnostic,
 same null generator, but applied to both stages of the hurdle and
@@ -40,7 +41,7 @@ from bgbw_trends.pipeline import (
     _predict,
     train_predict_species,
 )
-from bgbw_trends.trends.ensemble import _resolve_inner_n_jobs
+from bgbw_trends.trends.ensemble import _resolve_inner_n_jobs, split_cell_years
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,9 @@ class ResidualConfoundingResult:
     n_successful: int
 
 
+_NULL_DGP_MAX_TREES = 100
+
+
 def _null_species_values(
     df: pd.DataFrame,
     species: str,
@@ -82,10 +86,17 @@ def _null_species_values(
     # X excludes year (year is in df but not in marginal_covariates default).
     X = _assemble_X(df, None)
 
+    # The null DGP forests only need a rough conditional mean for the
+    # Bernoulli draw / parametric bootstrap — they are not the diagnostic
+    # model and their quality does not affect the bias estimate. Cap at
+    # _NULL_DGP_MAX_TREES regardless of cfg.n_estimators; this makes RC
+    # sims materially faster at high n_estimators (cluster runs).
+    null_cfg = replace(cfg, n_estimators=min(cfg.n_estimators, _NULL_DGP_MAX_TREES))
+
     # Occurrence null — Bernoulli(p̂(X))
     y_bin = (df[species] > 0).to_numpy(dtype=np.float64)
     _occ_forest, p_hat = _fit_nuisance(
-        X, y_bin, cfg, seed=int(rng.integers(0, 2**31))
+        X, y_bin, null_cfg, seed=int(rng.integers(0, 2**31))
     )
     p_hat = np.clip(p_hat, 0.0, 1.0)
     y_bin_null = rng.binomial(1, p_hat).astype(np.float64)
@@ -103,7 +114,7 @@ def _null_species_values(
     Y_log = np.log1p(df.loc[orig_detected, species].to_numpy(dtype=np.float64))
     X_det = X.iloc[orig_detected.nonzero()[0]].reset_index(drop=True)
     _count_forest, m_count_oof = _fit_nuisance(
-        X_det, Y_log, cfg, seed=int(rng.integers(0, 2**31)),
+        X_det, Y_log, null_cfg, seed=int(rng.integers(0, 2**31)),
     )
     resid_sd = float(np.std(Y_log - m_count_oof, ddof=0))
 
@@ -144,10 +155,15 @@ def _one_null_simulation(
     # Steps 2–3 — regenerate the species column under a zero-trend DGP.
     null_df[species] = _null_species_values(null_df, species, cfg, rng)
 
+    # Step 4 — split 50/50 stratified by year, matching the ensemble exactly.
+    # This keeps RC methodologically consistent with what the ensemble does
+    # and halves the RF training cost per sim.
+    occ_df, count_df = split_cell_years(null_df, rng)
+
     try:
         pred = train_predict_species(
-            null_df,
-            null_df,
+            occ_df,
+            count_df,
             species=species,
             cfg=cfg,
             grid=grid,
