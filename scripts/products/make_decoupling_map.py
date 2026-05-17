@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 import geopandas as gpd
+import yaml
 import matplotlib as mpl
 import matplotlib.colors as mc
 import matplotlib.pyplot as plt
@@ -1102,14 +1103,37 @@ def plot_bivariate_map(
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 
+def _load_config_defaults(config_path: str | None) -> dict:
+    if config_path is None:
+        return {}
+    with open(config_path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    out: dict = {}
+    if "run" in raw and "output_dir" in raw["run"]:
+        out["results"] = raw["run"]["output_dir"]
+    if "paths" in raw and "uk_shp" in raw["paths"]:
+        out["uk_shp"] = raw["paths"]["uk_shp"]
+    return out
+
+
 def _parse_args() -> argparse.Namespace:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    pre_args, _ = pre.parse_known_args()
+    cfg = _load_config_defaults(pre_args.config)
+
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
+        "--config",
+        default=None,
+        help="pipeline YAML config file; sets --results and --uk-shp defaults",
+    )
+    p.add_argument(
         "--results",
-        default="output/prototype",
+        default=cfg.get("results", "output/prototype"),
         help="directory with species parquet files (default: output/prototype)",
     )
     p.add_argument(
@@ -1149,7 +1173,11 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--dpi", type=int, default=300)
-    p.add_argument("--uk-shp", default=None)
+    p.add_argument(
+        "--uk-shp",
+        default=cfg.get("uk_shp"),
+        help="path to UK boundary shapefile; read from --config if omitted",
+    )
     return p.parse_args()
 
 

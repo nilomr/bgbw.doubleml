@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 # Ensure the package is importable when running as a script.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -65,15 +66,38 @@ _COMMON_NAMES: dict[str, str] = {
 }
 
 
+def _load_config_defaults(config_path: str | None) -> dict:
+    if config_path is None:
+        return {}
+    with open(config_path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    out: dict = {}
+    if "run" in raw and "output_dir" in raw["run"]:
+        out["results"] = raw["run"]["output_dir"]
+    if "paths" in raw and "uk_shp" in raw["paths"]:
+        out["uk_shp"] = raw["paths"]["uk_shp"]
+    return out
+
+
 def _parse_args() -> argparse.Namespace:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    pre_args, _ = pre.parse_known_args()
+    cfg = _load_config_defaults(pre_args.config)
+
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
+        "--config",
+        default=None,
+        help="pipeline YAML config file; sets --results and --uk-shp defaults",
+    )
+    p.add_argument(
         "--results",
-        default="output/prototype",
-        help="directory containing species_*.parquet files (default: output/prototype)",
+        default=cfg.get("results", "output/prototype"),
+        help="directory containing species prediction parquets (default: output/prototype)",
     )
     p.add_argument(
         "--species",
@@ -102,8 +126,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--uk-shp",
-        default=None,
-        help="path to UK boundary shapefile; uses built-in default if omitted",
+        default=cfg.get("uk_shp"),
+        help="path to UK boundary shapefile; read from --config if omitted",
     )
     return p.parse_args()
 
