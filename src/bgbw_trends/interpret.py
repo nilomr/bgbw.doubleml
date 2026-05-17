@@ -43,14 +43,58 @@ class ShapExplanation:
     ``values`` is (n_samples, n_features); ``base_value`` is the model's
     expected output over the background set. ``feature_names`` aligns
     with the columns of ``X_explained``.
+
+    For CATE surrogate explanations two quality metrics are stored:
+    - ``surrogate_r2_faithful``: in-sample R² — does the surrogate reproduce τ̂
+      on the samples used to train it? This is the right faithfulness check.
+    - ``surrogate_r2_oob``: out-of-bag R² — measures generalisation, which is
+      *not* the surrogate's goal and will be lower when τ̂ is noisy.
+
+    ``grf_importances`` (CATE only) is the CausalForest's heterogeneity-based
+    feature importance from the GRF paper — unsigned but theoretically grounded
+    and surrogate-free.
     """
 
     values: np.ndarray
     base_value: float
     feature_names: list[str]
     X_explained: pd.DataFrame
-    surrogate_r2: float | None = None
+    surrogate_r2_faithful: float | None = None
+    surrogate_r2_oob: float | None = None
+    surrogate_r2: float | None = None  # legacy alias → surrogate_r2_faithful
+    grf_importances: pd.DataFrame | None = None
     top_features: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    def to_frame(self, stage: str) -> pd.DataFrame:
+        """Long-format DataFrame: one row per (sample × feature).
+
+        Columns: stage, feature, shap_value (signed), feature_value,
+        base_value, and surrogate_r2 (CATE stages only).
+
+        Use float32 throughout — precision is sufficient for plotting and
+        the column count is large enough that float64 doubles file size
+        for no practical benefit.
+        """
+        chunks = []
+        for i, feat in enumerate(self.feature_names):
+            fv = self.X_explained[feat].to_numpy(dtype=np.float32)
+            chunks.append(
+                pd.DataFrame(
+                    {
+                        "stage": stage,
+                        "feature": feat,
+                        "shap_value": self.values[:, i].astype(np.float32),
+                        "feature_value": fv,
+                    }
+                )
+            )
+        df = pd.concat(chunks, ignore_index=True)
+        df["base_value"] = np.float32(self.base_value)
+        if self.surrogate_r2_faithful is not None:
+            df["surrogate_r2_faithful"] = np.float32(self.surrogate_r2_faithful)
+        if self.surrogate_r2_oob is not None:
+            df["surrogate_r2_oob"] = np.float32(self.surrogate_r2_oob)
+        return df
 
 
 def _mean_abs_importance(values: np.ndarray, feature_names: list[str]) -> pd.DataFrame:
@@ -117,17 +161,19 @@ def explain_cate_surrogate(
     surrogate_sample_size: int = 10_000,
     sample_size: int = 2000,
     seed: int = 0,
-    surrogate_n_estimators: int = 1000,
-    surrogate_min_samples_leaf: int = 20,
-    r2_warn_threshold: float = 0.9,
+    surrogate_n_estimators: int = 500,
+    surrogate_min_samples_leaf: int = 2,
+    surrogate_max_features: float = 0.5,
+    faithfulness_warn_threshold: float = 0.85,
 ) -> ShapExplanation:
     """SHAP attribution for a causal forest via a surrogate RandomForest.
 
     Parameters
     ----------
     cf
-        A fitted ``econml.grf.CausalForest``. Must expose ``predict(W)``.
-        Only called when ``tau_hat`` is not provided.
+        A fitted ``econml.grf.CausalForest``. Used to extract the native
+        GRF feature importances. ``predict(W)`` is called only when
+        ``tau_hat`` is not provided.
     W
         The heterogeneity matrix used at fit time (ndarray).
     feature_names
@@ -139,21 +185,27 @@ def explain_cate_surrogate(
         / ``tau_count`` to avoid a redundant (slow) cf.predict call and
         to give the surrogate full-N coverage of the τ̂(W) surface.
     surrogate_sample_size
-        When ``tau_hat`` is provided this limits how many of the N
-        training rows are passed to the surrogate fit (RF fitting is
-        O(n log n)). When ``tau_hat`` is None, this is the number of
-        rows subsampled from ``W`` before calling ``cf.predict``, which
-        is the expensive step — keep at or below ~3k in that case.
+        Rows subsampled from (W, τ̂) for surrogate training. When
+        ``tau_hat`` is None this also limits how many rows are passed to
+        the slow ``cf.predict`` call — keep at or below ~3k in that case.
     sample_size, seed
         Further subsample of the surrogate training rows passed to
-        ``shap.TreeExplainer`` (approximate algorithm).
-    surrogate_n_estimators, surrogate_min_samples_leaf
-        Hyperparameters for the sklearn RF that approximates τ̂(W).
-        200 trees with min_samples_leaf=1 and max_features="sqrt" give
-        good diversity and avoid OOB overfitting on a ~10k row sample.
-    r2_warn_threshold
-        Logs a warning if the surrogate OOB R² is below this; below
-        ~0.9 the SHAP decomposition is a crude approximation of τ̂.
+        ``shap.TreeExplainer``.
+    surrogate_n_estimators, surrogate_min_samples_leaf, surrogate_max_features
+        Surrogate RF hyperparameters.  The surrogate's goal is faithfulness
+        to τ̂ on the observed data, not generalisation to new points, so
+        ``min_samples_leaf`` should be small (2–5) to allow deep trees.
+        ``max_features=0.5`` is better than "sqrt" when W contains many
+        correlated PCA components, because it gives each split a wider
+        view of the feature space.
+    faithfulness_warn_threshold
+        Warns if the surrogate's *in-sample* R² (faithfulness to τ̂ on its
+        training data) falls below this.  This is the correct quality check:
+        OOB R² measures generalisation, but a surrogate that faithfully
+        interpolates τ̂ on the training set is what TreeExplainer needs.
+        Genuine spatial homogeneity (low τ̂ CV) will suppress faithfulness R²
+        even for a well-fit surrogate — this is a result, not a quality
+        failure.
     """
     import shap
 
@@ -163,18 +215,14 @@ def explain_cate_surrogate(
         )
 
     W_df_full = pd.DataFrame(W, columns=feature_names)
+    rng = np.random.default_rng(seed)
 
     if tau_hat is not None:
-        # Fast path: precomputed predictions — skip cf.predict entirely and
-        # use the full training W. Subsample only for surrogate fit speed.
-        if len(tau_hat) != len(W_df_full):
-            raise ValueError(
-                f"tau_hat length {len(tau_hat)} != W rows {len(W_df_full)}"
-            )
         tau_hat_arr = np.asarray(tau_hat).ravel()
-        W_sub = _subsample(W_df_full, surrogate_sample_size, seed)
-        # subsample tau_hat to match W_sub's row selection
-        rng = np.random.default_rng(seed)
+        if len(tau_hat_arr) != len(W_df_full):
+            raise ValueError(
+                f"tau_hat length {len(tau_hat_arr)} != W rows {len(W_df_full)}"
+            )
         if surrogate_sample_size < len(W_df_full):
             idx = rng.choice(len(W_df_full), size=surrogate_sample_size, replace=False)
             W_sub = W_df_full.iloc[idx].reset_index(drop=True)
@@ -183,66 +231,84 @@ def explain_cate_surrogate(
             W_sub = W_df_full.copy()
             tau_sub = tau_hat_arr
     else:
-        # Slow path: call cf.predict on a small subsample — keep
-        # surrogate_sample_size ≤ ~3k to avoid OOM / long runtimes.
         W_sub = _subsample(W_df_full, surrogate_sample_size, seed)
         tau_sub = np.asarray(cf.predict(W_sub.to_numpy())).ravel()
 
-    # Coefficient of variation of τ̂(W): measures how much spatial
-    # heterogeneity is actually present.  When cv is small the CATE
-    # surface is near-flat and no surrogate — however large — can achieve
-    # high OOB R², because the target is dominated by estimation noise
-    # rather than genuine spatial signal.  Low R² in that regime is
-    # expected and informative, not a model quality failure.
+    # CV of τ̂: near-zero means little real spatial heterogeneity; any low R²
+    # in that case reflects a flat target, not a poorly-fit surrogate.
     tau_std = float(np.std(tau_sub))
     tau_mean_abs = float(np.mean(np.abs(tau_sub))) + 1e-9
     tau_cv = tau_std / tau_mean_abs
 
+    # ── Surrogate fit ─────────────────────────────────────────────────────
+    # min_samples_leaf is kept small (2) so trees are deep enough to
+    # interpolate τ̂(W).  Unlike a prediction forest, the surrogate does not
+    # need to generalise — it just needs to reproduce τ̂ on the samples it
+    # sees, so TreeExplainer can decompose those predictions faithfully.
+    # max_features=0.5 (vs "sqrt") gives each split a wider view of the
+    # feature space, which matters when W contains many correlated PCA dims.
     surrogate = RandomForestRegressor(
         n_estimators=surrogate_n_estimators,
         min_samples_leaf=surrogate_min_samples_leaf,
-        max_features="sqrt",
+        max_features=surrogate_max_features,
         n_jobs=-1,
         random_state=seed,
         oob_score=True,
     )
     surrogate.fit(W_sub, tau_sub)
 
-    # Use OOB R² (unbiased) when available, else in-sample.
-    if hasattr(surrogate, "oob_score_"):
-        fit_r2 = float(surrogate.oob_score_)
-    else:
-        fit_r2 = float(r2_score(tau_sub, surrogate.predict(W_sub)))
+    # Faithfulness R²: in-sample fit to τ̂ — the primary quality metric.
+    faithful_r2 = float(r2_score(tau_sub, surrogate.predict(W_sub)))
+    oob_r2 = float(surrogate.oob_score_) if hasattr(surrogate, "oob_score_") else None
 
-    if fit_r2 < r2_warn_threshold:
-        if tau_cv < 0.1:
-            # Low R² because the CATE surface is near-homogeneous — this is
-            # a result, not a surrogate quality problem.  SHAP will show
-            # near-uniform feature importance, which is correct.
-            logger.info(
-                "CATE surrogate OOB R² = %.3f (τ̂ CV = %.3f — near-homogeneous "
-                "trend; low R² is expected). SHAP values reflect noise, not "
-                "spatial signal.",
-                fit_r2,
-                tau_cv,
-            )
-        else:
-            logger.warning(
-                "CATE surrogate OOB R² = %.3f (below %.2f, τ̂ CV = %.3f). "
-                "SHAP values are a rough approximation of τ̂(W). "
-                "Consider raising surrogate_n_estimators or lowering "
-                "surrogate_min_samples_leaf.",
-                fit_r2,
-                r2_warn_threshold,
-                tau_cv,
-            )
+    if tau_cv < 0.1:
+        logger.info(
+            "CATE surrogate  faithful R² = %.3f  OOB R² = %s  τ̂ CV = %.3f "
+            "(near-homogeneous CATE — low R² is a result, not a quality issue; "
+            "SHAP values will be near-zero across all features)",
+            faithful_r2,
+            f"{oob_r2:.3f}" if oob_r2 is not None else "n/a",
+            tau_cv,
+        )
+    elif faithful_r2 < faithfulness_warn_threshold:
+        logger.warning(
+            "CATE surrogate  faithful R² = %.3f  OOB R² = %s  τ̂ CV = %.3f "
+            "(faithfulness below %.2f — SHAP values are a rough approximation; "
+            "consider raising surrogate_n_estimators or lowering "
+            "surrogate_min_samples_leaf further)",
+            faithful_r2,
+            f"{oob_r2:.3f}" if oob_r2 is not None else "n/a",
+            tau_cv,
+            faithfulness_warn_threshold,
+        )
     else:
-        logger.info("CATE surrogate OOB R² = %.3f (τ̂ CV = %.3f)", fit_r2, tau_cv)
+        logger.info(
+            "CATE surrogate  faithful R² = %.3f  OOB R² = %s  τ̂ CV = %.3f",
+            faithful_r2,
+            f"{oob_r2:.3f}" if oob_r2 is not None else "n/a",
+            tau_cv,
+        )
 
+    # ── GRF-native feature importances ───────────────────────────────────
+    # CausalForest.feature_importances_ is the heterogeneity-weighted
+    # importance from the GRF paper (Athey, Tibshirani & Wager 2019):
+    # the normalised reduction in τ-variance attributable to each feature.
+    # It is surrogate-free and theoretically grounded, though unsigned.
+    grf_importances = None
+    try:
+        raw = np.asarray(cf.feature_importances_).ravel()
+        if len(raw) == len(feature_names):
+            grf_importances = (
+                pd.DataFrame({"feature": feature_names, "grf_importance": raw})
+                .sort_values("grf_importance", ascending=False)
+                .reset_index(drop=True)
+            )
+    except Exception:
+        pass
+
+    # ── SHAP via TreeExplainer on the surrogate ───────────────────────────
     X_sample = _subsample(W_sub, sample_size, seed)
     explainer = shap.TreeExplainer(surrogate)
-    # approximate=True uses the path-dependent algorithm: same ranking,
-    # ~10× faster than exact Shapley on 100-tree forests.
     values = np.asarray(explainer.shap_values(X_sample, approximate=True))
     base = float(np.atleast_1d(explainer.expected_value)[0])
     return ShapExplanation(
@@ -250,7 +316,10 @@ def explain_cate_surrogate(
         base_value=base,
         feature_names=feature_names,
         X_explained=X_sample,
-        surrogate_r2=fit_r2,
+        surrogate_r2_faithful=faithful_r2,
+        surrogate_r2_oob=oob_r2,
+        surrogate_r2=faithful_r2,  # legacy alias
+        grf_importances=grf_importances,
         top_features=_mean_abs_importance(values, feature_names),
     )
 
