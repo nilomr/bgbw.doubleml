@@ -7,14 +7,14 @@ paths:
   uk_shp: /data/BS/userdata/nilo/projects/BGBW/metadata/uk-shapefile/UK-shapefile.shp
 
 run:
-  species: [wood_pigeon] # , house_sparrow,blackcap, red_kite, ring_necked_parakeet, collared_dove, starling, chaffinch, greenfinch, goldfinch, blue_tit, great_tit]
+  species: [wood_pigeon, house_sparrow,blackcap, red_kite, ring_necked_parakeet, collared_dove, starling, chaffinch, greenfinch, goldfinch, blue_tit, great_tit]
   years: [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
   output_dir: output/cluster
 
 model:
   n_pca_components: 30
-  n_estimators: 500
-  cf_n_estimators: 500
+  n_estimators: 800
+  cf_n_estimators: 800
   rf_min_samples_leaf: 10
   cf_min_samples_leaf: 10
 
@@ -27,12 +27,12 @@ compute:
   # sim_n_estimators: trees per RF/CausalForest fit inside ensemble members and RC sims.
   #   0 = same as n_estimators (default). 150-250 is statistically sound because
   #   averaging across N members compensates for reduced per-member precision.
-  n_workers: 10
-  sim_n_estimators: 200
+  n_workers: 30
+  sim_n_estimators: 300
 
 ensemble:
   run: true
-  n_ensemble: 10
+  n_ensemble: 30
   n_rc_sims: 10
 
 log_file: logs/cluster.log

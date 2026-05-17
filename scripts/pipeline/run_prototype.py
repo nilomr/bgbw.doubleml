@@ -216,51 +216,30 @@ def main() -> None:
     section("Two-part DML trend + SDM")
     console.print()
 
-    # When multiple species are requested, run their DML fits in parallel using
-    # the same worker pool as ensemble/RC.  A single species always gets all
-    # cores (n_dml_workers=1 → effective_n_jobs(1) = cpu_count).
-    n_dml_workers = min(max(1, cfg.n_workers), len(cfg.species))
-    dml_n_jobs = cfg.effective_n_jobs(n_dml_workers)
-
-    # Pre-generate per-species seeds so splits are reproducible regardless of
-    # whether the loop runs sequentially or in parallel.
+    # Species are always processed one at a time so each fit gets all cores.
+    # (Ensemble/RC parallelism over n_workers sims per species is where the
+    # node is saturated; splitting cores across species gains nothing there.)
+    dml_n_jobs = cfg.effective_n_jobs(1)
     _seed_seq = np.random.SeedSequence(cfg.__dict__.get("seed", 42))
     _dml_seeds = [int(s.generate_state(1)[0]) for s in _seed_seq.spawn(len(cfg.species))]
 
-    def _fit_one_species(sp: str, split_seed: int):
-        sp_rng = np.random.default_rng(split_seed)
-        occ_df, cnt_df = split_cell_years(df, sp_rng)
-        return train_predict_species(
-            occ_df, cnt_df,
-            species=sp, cfg=cfg, grid=grid,
-            reference_effort=cfg.reference_effort,
-            return_models=True, n_jobs=dml_n_jobs,
-        )
-
-    if n_dml_workers > 1:
-        from joblib import Parallel, delayed as _delayed
-        logger.info(
-            "DML fits: %d species  •  %d parallel workers  •  %d threads/worker",
-            len(cfg.species), n_dml_workers, dml_n_jobs,
-        )
-        _fit_results = Parallel(n_jobs=n_dml_workers, backend="loky", verbose=0)(
-            _delayed(_fit_one_species)(sp, seed)
-            for sp, seed in zip(cfg.species, _dml_seeds)
-        )
-    else:
-        with make_progress() as prog:
-            task = prog.add_task("train_predict_species", total=len(cfg.species))
-            _fit_results = []
-            for sp, seed in zip(cfg.species, _dml_seeds):
-                prog.update(task, description=f"train_predict_species  [{sp}]")
-                _fit_results.append(_fit_one_species(sp, seed))
-                prog.advance(task)
-
     predictions = {}
     trained_models = {}
-    for sp, (pred, models) in zip(cfg.species, _fit_results):
-        predictions[sp] = pred
-        trained_models[sp] = models
+    with make_progress() as prog:
+        task = prog.add_task("train_predict_species", total=len(cfg.species))
+        for sp, seed in zip(cfg.species, _dml_seeds):
+            prog.update(task, description=f"train_predict_species  [{sp}]")
+            sp_rng = np.random.default_rng(seed)
+            occ_df, cnt_df = split_cell_years(df, sp_rng)
+            pred, models = train_predict_species(
+                occ_df, cnt_df,
+                species=sp, cfg=cfg, grid=grid,
+                reference_effort=cfg.reference_effort,
+                return_models=True, n_jobs=dml_n_jobs,
+            )
+            predictions[sp] = pred
+            trained_models[sp] = models
+            prog.advance(task)
 
     for sp, pred in predictions.items():
         console.print(
