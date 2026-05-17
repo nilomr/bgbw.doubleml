@@ -30,6 +30,7 @@ sum with the log-count slope is a proper per-year log change in abundance.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor as _ThreadPool
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -429,11 +430,21 @@ def train_predict_species(
         X_prop_occ = _assemble_X(df_occ, propensity_covariates)
     W_occ = _assemble_W(df_occ, treatment_covariates)
 
-    y_bin_forest, Y_bin_hat = _fit_nuisance(
-        X_marg_occ, Y_bin, cfg, seed=seed, n_jobs=n_jobs
-    )
+    # Marginal and propensity forests are independent — fit them concurrently
+    # when multiple threads are available.  sklearn RF uses prefer="threads"
+    # internally so no fork-from-thread hazards with loky outer workers.
+    if n_jobs > 1:
+        _nj = max(1, n_jobs // 2)
+        with _ThreadPool(max_workers=2) as _exe:
+            _fm = _exe.submit(_fit_nuisance, X_marg_occ, Y_bin, cfg, seed=seed, n_jobs=_nj)
+            _fp = _exe.submit(_fit_nuisance, X_prop_occ, T_occ, cfg, seed=seed + 1, n_jobs=_nj)
+            y_bin_forest, Y_bin_hat = _fm.result()
+            _, W_bin_hat = _fp.result()
+    else:
+        y_bin_forest, Y_bin_hat = _fit_nuisance(X_marg_occ, Y_bin, cfg, seed=seed, n_jobs=n_jobs)
+        _, W_bin_hat = _fit_nuisance(X_prop_occ, T_occ, cfg, seed=seed + 1, n_jobs=n_jobs)
     Y_bin_hat = np.clip(Y_bin_hat, 0.0, 1.0)
-    _, W_bin_hat = _fit_nuisance(X_prop_occ, T_occ, cfg, seed=seed + 1, n_jobs=n_jobs)
+    logger.info("train_predict_species[%s]: occ nuisance done", species)
 
     # Causal forest on residuals → τ_occ(W). econml's CausalForest does
     # not accept pre-computed Y.hat / W.hat (unlike grf), so we pass
@@ -448,6 +459,7 @@ def train_predict_species(
         n_jobs=n_jobs,
     )
     bin_cf.fit(X=W_occ, T=(T_occ - W_bin_hat), y=(Y_bin - Y_bin_hat))
+    logger.info("train_predict_species[%s]: occ causal forest done", species)
 
     # ── Count stage — detected rows only, log1p outcome ────────────────
     detected = (df_count[species] > 0).to_numpy(dtype=bool)
@@ -472,12 +484,17 @@ def train_predict_species(
         X_prop_count = _assemble_X(dc, propensity_covariates)
     W_count = _assemble_W(dc, treatment_covariates)
 
-    y_count_forest, Y_count_hat = _fit_nuisance(
-        X_marg_count, Y_log, cfg, seed=seed + 2, n_jobs=n_jobs
-    )
-    _, W_count_hat = _fit_nuisance(
-        X_prop_count, T_count, cfg, seed=seed + 3, n_jobs=n_jobs
-    )
+    if n_jobs > 1:
+        _nj = max(1, n_jobs // 2)
+        with _ThreadPool(max_workers=2) as _exe:
+            _fm = _exe.submit(_fit_nuisance, X_marg_count, Y_log, cfg, seed=seed + 2, n_jobs=_nj)
+            _fp = _exe.submit(_fit_nuisance, X_prop_count, T_count, cfg, seed=seed + 3, n_jobs=_nj)
+            y_count_forest, Y_count_hat = _fm.result()
+            _, W_count_hat = _fp.result()
+    else:
+        y_count_forest, Y_count_hat = _fit_nuisance(X_marg_count, Y_log, cfg, seed=seed + 2, n_jobs=n_jobs)
+        _, W_count_hat = _fit_nuisance(X_prop_count, T_count, cfg, seed=seed + 3, n_jobs=n_jobs)
+    logger.info("train_predict_species[%s]: count nuisance done", species)
 
     count_r2, count_rmse = _r2_rmse(Y_log, Y_count_hat)
     prop_occ_r2, prop_occ_rmse = _r2_rmse(T_occ, W_bin_hat)
@@ -504,6 +521,7 @@ def train_predict_species(
         n_jobs=n_jobs,
     )
     count_cf.fit(X=W_count, T=(T_count - W_count_hat), y=(Y_log - Y_count_hat))
+    logger.info("train_predict_species[%s]: count causal forest done", species)
 
     # ── Per-observation PLR components ────────────────────────────────
     # Store raw inputs and nuisance/causal predictions per training row,

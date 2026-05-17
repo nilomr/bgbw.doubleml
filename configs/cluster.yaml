@@ -24,7 +24,11 @@ compute:
   # automatically clamped, and inner threading is auto-set to cpu_count // n_workers.
   # Rule of thumb: n_workers = n_ensemble = n_rc_sims saturates the node cleanly.
   # inner_n_jobs: 0  # 0 = auto; set >0 to override threads per fit
+  # sim_n_estimators: trees per RF/CausalForest fit inside ensemble members and RC sims.
+  #   0 = same as n_estimators (default). 150-250 is statistically sound because
+  #   averaging across N members compensates for reduced per-member precision.
   n_workers: 10
+  sim_n_estimators: 200
 
 ensemble:
   run: true

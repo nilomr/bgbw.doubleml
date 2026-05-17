@@ -310,6 +310,14 @@ class RunConfig:
     # matters more than logical-core count.
     inner_n_jobs: int = 0
 
+    # ``sim_n_estimators`` — trees per RF / CausalForest fit inside ensemble
+    # members and RC null simulations.  0 = same as n_estimators.
+    # Ensemble and RC averaging across N members compensates for reduced
+    # per-member precision, so 150–250 trees per member is statistically
+    # sound while cutting sim time proportionally.  The initial single DML
+    # fit and SDM always use the full n_estimators.
+    sim_n_estimators: int = 0
+
     def effective_n_jobs(self, n_outer: int = 1) -> int:
         """Threads to assign per RF / CausalForest fit.
 

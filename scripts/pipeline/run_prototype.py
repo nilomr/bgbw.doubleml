@@ -130,6 +130,7 @@ def main() -> None:
             cf_min_samples_leaf=model.get("cf_min_samples_leaf", 50),
             n_workers=compute.get("n_workers", 1),
             inner_n_jobs=compute.get("inner_n_jobs", 0),
+            sim_n_estimators=compute.get("sim_n_estimators", 0),
         )
         return (
             cfg,

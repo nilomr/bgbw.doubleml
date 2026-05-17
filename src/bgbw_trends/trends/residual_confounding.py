@@ -239,6 +239,8 @@ def _one_null_simulation(
     """
     label = f"{sim_idx + 1}/{n_total}" if n_total else str(sim_idx + 1)
     logger.info("Null sim %s starting [%s]", label, species)
+    if cfg.sim_n_estimators > 0:
+        cfg = replace(cfg, n_estimators=cfg.sim_n_estimators, cf_n_estimators=cfg.sim_n_estimators)
     rng = np.random.default_rng(sim_seed)
     years = df["year"].to_numpy()
     unique_years = np.unique(years)
@@ -345,7 +347,12 @@ def diagnose_residual_confounding(
     ]
 
     if n_workers == 1:
-        results_raw = [_one_null_simulation(*args) for args in jobs]
+        results_raw = []
+        for args in jobs:
+            results_raw.append(_one_null_simulation(*args))
+            logger.info(
+                "RC null sims: %d/%d complete [%s]", len(results_raw), n_simulations, species
+            )
     else:
         from joblib import Parallel, delayed
 
@@ -354,9 +361,15 @@ def diagnose_residual_confounding(
             n_workers,
             worker_n_jobs,
         )
-        results_raw = Parallel(n_jobs=n_workers, backend="loky", verbose=0)(
+        _gen = Parallel(n_jobs=n_workers, backend="loky", verbose=0, return_as="generator_unordered")(
             delayed(_one_null_simulation)(*args) for args in jobs
         )
+        results_raw = []
+        for r in _gen:
+            results_raw.append(r)
+            logger.info(
+                "RC null sims: %d/%d complete [%s]", len(results_raw), n_simulations, species
+            )
 
     sim_records: list[pd.DataFrame] = []
     ate_occ_list: list[float] = []

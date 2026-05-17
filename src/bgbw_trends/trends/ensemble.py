@@ -28,7 +28,7 @@ accordingly.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -128,6 +128,8 @@ def _ensemble_member(
     """
     label = f"{member_idx + 1}/{n_total}" if n_total else str(member_idx + 1)
     logger.info("Ensemble member %s starting [%s]", label, species)
+    if cfg.sim_n_estimators > 0:
+        cfg = replace(cfg, n_estimators=cfg.sim_n_estimators, cf_n_estimators=cfg.sim_n_estimators)
     try:
         rng = np.random.default_rng(split_seed)
         occ_df, count_df = split_cell_years(df, rng)
@@ -224,7 +226,12 @@ def fit_ensemble_trend(
     ]
 
     if n_workers == 1:
-        results = [_ensemble_member(*args) for args in jobs]
+        results = []
+        for args in jobs:
+            results.append(_ensemble_member(*args))
+            logger.info(
+                "Ensemble: %d/%d members complete [%s]", len(results), n_ensemble, species
+            )
     else:
         from joblib import Parallel, delayed
 
@@ -234,9 +241,15 @@ def fit_ensemble_trend(
             n_workers,
             worker_n_jobs,
         )
-        results = Parallel(n_jobs=n_workers, backend="loky", verbose=0)(
+        _gen = Parallel(n_jobs=n_workers, backend="loky", verbose=0, return_as="generator_unordered")(
             delayed(_ensemble_member)(*args) for args in jobs
         )
+        results = []
+        for r in _gen:
+            results.append(r)
+            logger.info(
+                "Ensemble: %d/%d members complete [%s]", len(results), n_ensemble, species
+            )
 
     successful = [r for r in results if r is not None]
     n_ok = len(successful)
