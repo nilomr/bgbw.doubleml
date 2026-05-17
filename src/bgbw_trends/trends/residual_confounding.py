@@ -125,6 +125,7 @@ def _one_null_simulation(
     reference_effort: ReferenceEffort,
     sim_idx: int,
     sim_seed: int,
+    nuisance_params=None,
 ) -> tuple[float, float] | None:
     """Run one null-trend simulation. Top-level so workers can pickle it."""
     rng = np.random.default_rng(sim_seed)
@@ -153,6 +154,7 @@ def _one_null_simulation(
             grid=grid,
             reference_effort=reference_effort,
             seed=int(rng.integers(0, 2**31)),
+            nuisance_params=nuisance_params,
         )
     except Exception as e:  # noqa: BLE001 — isolate failing sims
         logger.warning("Null simulation %d failed: %s", sim_idx, e)
@@ -169,6 +171,7 @@ def diagnose_residual_confounding(
     reference_effort: ReferenceEffort,
     n_simulations: int = 10,
     seed: int = 0,
+    nuisance_params=None,
 ) -> ResidualConfoundingResult:
     """Run the null-trend simulation (Fink vignette §2.2).
 
@@ -206,6 +209,7 @@ def diagnose_residual_confounding(
             reference_effort,
             i,
             int(child_seeds[i].generate_state(1)[0]),
+            nuisance_params,
         )
         for i in range(n_simulations)
     ]

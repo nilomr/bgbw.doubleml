@@ -122,6 +122,7 @@ def _ensemble_member(
     member_idx: int,
     split_seed: int,
     fit_seed: int,
+    nuisance_params=None,
 ) -> dict | None:
     """Fit one ensemble member; return the per-member arrays or None on failure.
 
@@ -138,6 +139,7 @@ def _ensemble_member(
             grid=grid,
             reference_effort=reference_effort,
             seed=fit_seed,
+            nuisance_params=nuisance_params,
         )
         assert isinstance(result, SpeciesPrediction)
         return {
@@ -161,6 +163,7 @@ def fit_ensemble_trend(
     reference_effort: ReferenceEffort | None = None,
     n_ensemble: int = 25,
     seed: int = 42,
+    nuisance_params=None,
 ) -> EnsembleTrendResult:
     """Run an ensemble of two-part DML trend fits over the assembled data.
 
@@ -210,6 +213,7 @@ def fit_ensemble_trend(
             i,
             int(child_seeds[i].generate_state(1)[0]),
             seed + i,
+            nuisance_params,
         )
         for i in range(n_ensemble)
     ]

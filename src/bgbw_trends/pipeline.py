@@ -31,7 +31,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
+
+if TYPE_CHECKING:
+    from bgbw_trends.tuning import TunedNuisanceParams
 
 import numpy as np
 import pandas as pd
@@ -93,7 +96,12 @@ def _r2_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
 # ── RF factory + OOB fit ──────────────────────────────────────────────────
 
 
-def _make_rf(cfg: RunConfig):
+def _make_rf(
+    cfg: RunConfig,
+    *,
+    min_samples_leaf: int | None = None,
+    max_features: str | float | None = None,
+):
     """Random Forest for nuisance models (marginal response + propensity).
 
     Mirrors ``grf::regression_forest`` with ``tune.parameters="all"`` in
@@ -110,11 +118,20 @@ def _make_rf(cfg: RunConfig):
     ``cfg.inner_n_jobs`` controls per-fit threading. Use 1 when an outer
     process pool (ensemble / residual-confounding) already saturates
     the machine, to avoid CPU oversubscription.
+
+    ``min_samples_leaf`` and ``max_features`` override the cfg/sklearn
+    defaults when given — used by the per-stage tuner
+    (``bgbw_trends.tuning``) so each of the four nuisance forests can
+    pick its own values.
     """
     return _RF(
         n_estimators=cfg.n_estimators,
-        min_samples_leaf=cfg.rf_min_samples_leaf,
-        max_features="sqrt",
+        min_samples_leaf=(
+            min_samples_leaf
+            if min_samples_leaf is not None
+            else cfg.rf_min_samples_leaf
+        ),
+        max_features=max_features if max_features is not None else "sqrt",
         bootstrap=True,
         oob_score=True,
         n_jobs=cfg.inner_n_jobs,
@@ -132,6 +149,8 @@ def _fit_nuisance(
     cfg: RunConfig,
     *,
     seed: int,
+    min_samples_leaf: int | None = None,
+    max_features: str | float | None = None,
 ):
     """Fit a nuisance RF and return ``(model, oof_predictions)``.
 
@@ -140,8 +159,11 @@ def _fit_nuisance(
     The ``seed`` argument is accepted for API symmetry across the four
     nuisance fits but is not used — sklearn RF is seeded via ``RunConfig``
     or left as the global numpy RNG.
+
+    ``min_samples_leaf`` and ``max_features`` override the cfg/sklearn
+    defaults for this call (used by the per-stage tuner).
     """
-    model = _make_rf(cfg)
+    model = _make_rf(cfg, min_samples_leaf=min_samples_leaf, max_features=max_features)
     model.fit(X, y)
     oob = np.asarray(model.oob_prediction_, dtype=np.float64).ravel()
     bad = ~np.isfinite(oob)
@@ -353,6 +375,7 @@ def train_predict_species(
     seed: int = 0,
     compute_variance: bool = False,
     return_models: bool = False,
+    nuisance_params: "TunedNuisanceParams | None" = None,
 ) -> "SpeciesPrediction | tuple[SpeciesPrediction, TrainedSpeciesModels]":
     """Fit the two-part DML trend + SDM for one species.
 
@@ -423,9 +446,19 @@ def train_predict_species(
         X_prop_occ = _assemble_X(df_occ, propensity_covariates)
     W_occ = _assemble_W(df_occ, treatment_covariates)
 
-    y_bin_forest, Y_bin_hat = _fit_nuisance(X_marg_occ, Y_bin, cfg, seed=seed)
+    occ_marg_leaf = nuisance_params.occ_marginal if nuisance_params else None
+    occ_marg_mf = nuisance_params.occ_marginal_max_features if nuisance_params else None
+    occ_prop_leaf = nuisance_params.occ_propensity if nuisance_params else None
+    occ_prop_mf = nuisance_params.occ_propensity_max_features if nuisance_params else None
+    y_bin_forest, Y_bin_hat = _fit_nuisance(
+        X_marg_occ, Y_bin, cfg, seed=seed,
+        min_samples_leaf=occ_marg_leaf, max_features=occ_marg_mf,
+    )
     Y_bin_hat = np.clip(Y_bin_hat, 0.0, 1.0)
-    _, W_bin_hat = _fit_nuisance(X_prop_occ, T_occ, cfg, seed=seed + 1)
+    _, W_bin_hat = _fit_nuisance(
+        X_prop_occ, T_occ, cfg, seed=seed + 1,
+        min_samples_leaf=occ_prop_leaf, max_features=occ_prop_mf,
+    )
 
     # Causal forest on residuals → τ_occ(W). econml's CausalForest does
     # not accept pre-computed Y.hat / W.hat (unlike grf), so we pass
@@ -464,8 +497,18 @@ def train_predict_species(
         X_prop_count = _assemble_X(dc, propensity_covariates)
     W_count = _assemble_W(dc, treatment_covariates)
 
-    y_count_forest, Y_count_hat = _fit_nuisance(X_marg_count, Y_log, cfg, seed=seed + 2)
-    _, W_count_hat = _fit_nuisance(X_prop_count, T_count, cfg, seed=seed + 3)
+    count_marg_leaf = nuisance_params.count_marginal if nuisance_params else None
+    count_marg_mf = nuisance_params.count_marginal_max_features if nuisance_params else None
+    count_prop_leaf = nuisance_params.count_propensity if nuisance_params else None
+    count_prop_mf = nuisance_params.count_propensity_max_features if nuisance_params else None
+    y_count_forest, Y_count_hat = _fit_nuisance(
+        X_marg_count, Y_log, cfg, seed=seed + 2,
+        min_samples_leaf=count_marg_leaf, max_features=count_marg_mf,
+    )
+    _, W_count_hat = _fit_nuisance(
+        X_prop_count, T_count, cfg, seed=seed + 3,
+        min_samples_leaf=count_prop_leaf, max_features=count_prop_mf,
+    )
 
     count_r2, count_rmse = _r2_rmse(Y_log, Y_count_hat)
     prop_occ_r2, prop_occ_rmse = _r2_rmse(T_occ, W_bin_hat)

@@ -343,7 +343,32 @@ Both honour `RunConfig.n_workers`:
   on a machine sized for it (cluster nodes, big workstations).
 
 CLI flags on `scripts/pipeline/run_prototype.py`:
-`--n-workers N --inner-n-jobs N --n-ensemble N --n-rc-sims N`.
+`--n-workers N --inner-n-jobs N --n-ensemble N --n-rc-sims N --tune`.
+
+---
+
+## 7b. Hyperparameter tuning
+
+`--tune` (off by default) runs [`tune_nuisance_for_species`](../src/bgbw_trends/tuning.py)
+once per species before any fitting. It picks the best `min_samples_leaf`
+for each of the four nuisance forests independently, scoring candidates
+by sklearn's `oob_score_`. The chosen hyperparameters are then frozen
+and reused for the main fit, every ensemble member, and every
+residual-confounding simulation — the "tune once, freeze, reuse" pattern.
+Per-replicate tuning (Fink's grf default) is not implemented; it would
+need cluster-scale parallelism to be tractable.
+
+Search space is intentionally small: `min_samples_leaf ∈ {5, 10, 20, 50}`,
+`max_features="sqrt"` fixed. Cost is 4 candidates × 4 forests = 16 extra
+nuisance fits per species (each at full `cfg.n_estimators` because OOB
+R² is biased downward at low tree counts). Causal forests are not tuned
+— econml has no native OOB and the τ(W) signal is dominated by nuisance
+quality anyway.
+
+The tuner only moves the needle when nuisance R² is in the meaningful
+band (~0.2–0.7). Tiny R² (no signal) and very high R² (year-leak in
+features) are both data problems that tuning can't fix — see the
+console output of `--tune` for the per-stage scores.
 
 ---
 

@@ -49,6 +49,7 @@ from bgbw_trends.interpret import (
     plot_shap_panel,
 )
 from bgbw_trends.pipeline import train_predict_species
+from bgbw_trends.tuning import tune_nuisance_for_species
 from bgbw_trends.plotting import (
     plot_prediction_distribution_summary,
     plot_raw_vs_fitted,
@@ -149,6 +150,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the ensemble step (uncertainty quantification).",
     )
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help=(
+            "Tune min_samples_leaf per nuisance forest (OOB R²) once per "
+            "species, then reuse those hyperparameters for the main fit, "
+            "ensemble, and residual-confounding sims. Costs ~16 extra "
+            "nuisance fits per species (4 candidates × 4 forests)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -224,6 +235,41 @@ def main() -> None:
         f"{cfg.reference_effort.n_surveys:.2f}[/cyan]"
     )
 
+    # ── Per-species hyperparameter tuning ───────────────────────────────
+    # When --tune is set, run the OOB-R² tuner once per species on the full
+    # df. The resulting params flow through the main fit, ensemble, and
+    # residual-confounding sims, so every replicate uses the same leaf
+    # sizes (matches the "tune once, freeze, reuse" pattern in the dev
+    # guide; cluster-style per-replicate tuning is not implemented here).
+    tuned_params: dict[str, object] = {}
+    if args.tune:
+        section("Hyperparameter tuning (nuisance forests)")
+        console.print()
+        for sp in cfg.species:
+            with timed_step(f"  tune  [{sp}]"):
+                tuned_params[sp] = tune_nuisance_for_species(
+                    df, df, species=sp, cfg=cfg
+                )
+            tp = tuned_params[sp]
+            console.print(
+                f"  [dim]{sp}:[/dim]"
+                f"  occ marg leaf=[cyan]{tp.occ_marginal}[/cyan]"
+                f" mf=[cyan]{tp.occ_marginal_max_features}[/cyan]"
+                f" (R²=[cyan]{tp.occ_marginal_oob_r2:+.3f}[/cyan])"
+                f"  occ prop leaf=[cyan]{tp.occ_propensity}[/cyan]"
+                f" mf=[cyan]{tp.occ_propensity_max_features}[/cyan]"
+                f" (R²=[cyan]{tp.occ_propensity_oob_r2:+.3f}[/cyan])"
+            )
+            console.print(
+                f"  [dim]{' ' * len(sp)} [/dim]"
+                f"  count marg leaf=[cyan]{tp.count_marginal}[/cyan]"
+                f" mf=[cyan]{tp.count_marginal_max_features}[/cyan]"
+                f" (R²=[cyan]{tp.count_marginal_oob_r2:+.3f}[/cyan])"
+                f"  count prop leaf=[cyan]{tp.count_propensity}[/cyan]"
+                f" mf=[cyan]{tp.count_propensity_max_features}[/cyan]"
+                f" (R²=[cyan]{tp.count_propensity_oob_r2:+.3f}[/cyan])"
+            )
+
     # ── Two-part DML trend + SDM (Fink §3.2) ────────────────────────────
     # Prototype path — Use fit_ensemble_trend for final trend inference.
     section("Two-part DML trend + SDM")
@@ -244,6 +290,7 @@ def main() -> None:
                 grid=grid,
                 reference_effort=cfg.reference_effort,
                 return_models=True,
+                nuisance_params=tuned_params.get(sp),
             )
             predictions[sp] = pred
             trained_models[sp] = models
@@ -408,6 +455,7 @@ def main() -> None:
             grid=grid,
             reference_effort=cfg.reference_effort,
             n_simulations=n_rc,
+            nuisance_params=tuned_params.get(cfg.species[0]),
         )
     print_rc_summary(rc.bias_ate_occ, rc.bias_ate_count, rc.n_successful, n_rc)
 
@@ -434,6 +482,7 @@ def main() -> None:
                 grid=grid,
                 reference_effort=cfg.reference_effort,
                 n_ensemble=n_ensemble,
+                nuisance_params=tuned_params.get(cfg.species[0]),
             )
         ensemble_path = out.species_ensemble_file(cfg.species[0])
         ensemble_path.parent.mkdir(parents=True, exist_ok=True)
