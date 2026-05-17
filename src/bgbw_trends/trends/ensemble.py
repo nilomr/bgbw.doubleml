@@ -47,6 +47,9 @@ class EnsembleTrendResult:
     ``bng_ref`` aligns all arrays. Per-year rates are *ratios* (multiply by
     100 for percent-per-year). Point estimates are the across-member median;
     ``lower``/``upper`` are 10th/90th percentiles (80% CI).
+
+    RC correction is NOT applied here — apply post-hoc using the coefficients
+    from ``adjustment.json`` (``corrected = beta0 + beta1 * abd_ppy``).
     """
 
     species: str
@@ -174,6 +177,8 @@ def fit_ensemble_trend(
     """Run an ensemble of two-part DML trend fits over the assembled data.
 
     Members are independent and run in parallel when ``cfg.n_workers > 1``.
+    RC correction is NOT applied here — use ``adjustment.json`` post-hoc:
+    ``corrected = beta0 + beta1 * abd_ppy``.
 
     Parameters
     ----------
