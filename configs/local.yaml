@@ -3,6 +3,7 @@ paths:
   aef_dir: /mnt/w/projects/BGBW/data/metadata/spatial/aef
   weather_path: /mnt/w/projects/BGBW/data/metadata/weather/bgbw_weather.parquet
   january_weather_path: /mnt/w/projects/BGBW/data/metadata/weather/bgbw_january_weather.parquet
+  uk_shp: /home/nilomr/projects/bgbw.metadata.pipeline/data/metadata/uk-shapefile/UK-shapefile.shp
 
 run:
   species: [red_kite]

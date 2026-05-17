@@ -205,7 +205,7 @@ def print_spatial_summary(
 
 
 def print_rc_summary(rc: object) -> None:
-    """Print residual confounding null-diagnostic summary (Fink §2.2).
+    """Print residual confounding null-diagnostic summary.
 
     Values near zero indicate the propensity score model has absorbed the
     interannual confounding.  bias_ate_abd is the headline: how much trend

@@ -52,7 +52,7 @@ _NULL_DGP_MAX_TREES = 100
 
 @dataclass
 class ResidualConfoundingResult:
-    """Null-simulation diagnostics for one species (Fink §2.2).
+    """Null-simulation diagnostics for one species.
 
     bias_ate_occ, bias_ate_count
         Mean range-wide ATE across null simulations for the occurrence and

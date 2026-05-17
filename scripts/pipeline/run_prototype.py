@@ -161,6 +161,7 @@ def main() -> None:
 
     # ── Configuration ────────────────────────────────────────────────────
     cfg, run_ensemble, n_ensemble, n_rc_sims = _build_run_config(raw)
+    uk_shp = Path(raw["paths"]["uk_shp"])
     out = cfg.output_paths()
 
     shutil.copy(_config_path, out.root / "config.yaml")
@@ -303,8 +304,12 @@ def main() -> None:
         species_fig_dir = out.species_figures_dir(sp)
         species_fig_dir.mkdir(parents=True, exist_ok=True)
 
-        plot_sdm_prediction_maps(pred, output_path=out.species_sdm_figure(sp))
-        plot_trend_ppy_panels(pred, output_path=out.species_trend_ppy_panels_figure(sp))
+        plot_sdm_prediction_maps(
+            pred, output_path=out.species_sdm_figure(sp), uk_shp=uk_shp
+        )
+        plot_trend_ppy_panels(
+            pred, output_path=out.species_trend_ppy_panels_figure(sp), uk_shp=uk_shp
+        )
         plot_prediction_distribution_summary(
             pred, output_path=out.species_distribution_summary_figure(sp)
         )
@@ -317,10 +322,14 @@ def main() -> None:
     for sp, models in trained_models.items():
         sp_label = sp.replace("_", " ").title()
         console.print(f"  [dim]{sp}[/dim]  SDM marginal forests…")
-        with timed_step("  SDM occ SHAP  (approx, n=500 rows)"):
-            occ_expl = explain_tree_model(models.y_bin_forest, models.X_marg_occ)
-        with timed_step("  SDM count SHAP  (approx, n=500 rows)"):
-            count_expl = explain_tree_model(models.y_count_forest, models.X_marg_count)
+        with timed_step("  SDM occ SHAP  (approx, n=2000 rows)"):
+            occ_expl = explain_tree_model(
+                models.y_bin_forest, models.X_marg_occ, sample_size=2000
+            )
+        with timed_step("  SDM count SHAP  (approx, n=2000 rows)"):
+            count_expl = explain_tree_model(
+                models.y_count_forest, models.X_marg_count, sample_size=2000
+            )
         console.print(f"  [dim]{sp}[/dim]  CATE surrogate forests…")
         with timed_step(
             f"  CATE occ  surrogate fit → SHAP (n={len(models.tau_occ)} rows)"
@@ -400,8 +409,8 @@ def main() -> None:
             f"  •  CATE → shap_cate.png + shap_cate.parquet"
         )
 
-    # ── Residual confounding calibration (Fink §3.4) ─────────────────────
-    section("Residual confounding diagnostic (Fink §2.2)")
+    # ── Residual confounding calibration ─────────────────────
+    section("Residual confounding diagnostic")
     console.print()
     rc_results: dict[str, object] = {}
     for sp in cfg.species:
