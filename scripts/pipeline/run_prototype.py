@@ -129,7 +129,6 @@ def main() -> None:
             rf_min_samples_leaf=model.get("rf_min_samples_leaf", 10),
             cf_min_samples_leaf=model.get("cf_min_samples_leaf", 50),
             n_workers=compute.get("n_workers", 1),
-            inner_n_jobs=compute.get("inner_n_jobs", -1),
         )
         return (
             cfg,
@@ -229,6 +228,7 @@ def main() -> None:
                 grid=grid,
                 reference_effort=cfg.reference_effort,
                 return_models=True,
+                n_jobs=cfg.effective_n_jobs(1),
             )
             predictions[sp] = pred
             trained_models[sp] = models

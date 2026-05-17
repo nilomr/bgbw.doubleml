@@ -1,9 +1,9 @@
 paths:
   # Update these to match the actual paths on the cluster
-  harmonized_dir: /data/bgbw/harmonized
-  aef_dir: /data/BS/userdata/nilo/projects/BGBW/data/metadata/spatial/aef/
-  weather_path: /data/bgbw/weather/bgbw_weather.parquet
-  january_weather_path: /data/bgbw/weather/bgbw_january_weather.parquet
+  harmonized_dir: /data/BS/userdata/nilo/projects/BGBW/data/harmonized
+  aef_dir: /data/BS/userdata/nilo/projects/BGBW/metadata/spatial/aef/
+  weather_path: /data/BS/userdata/nilo/projects/BGBW/metadata/weather/bgbw_weather.parquet
+  january_weather_path: /data/BS/userdata/nilo/projects/BGBW/metadata/weather/bgbw_january_weather.parquet
 
 run:
   species: [wood_pigeon] # , house_sparrow,blackcap, red_kite, ring_necked_parakeet, collared_dove, starling, chaffinch, greenfinch, goldfinch, blue_tit, great_tit]
@@ -18,8 +18,7 @@ model:
   cf_min_samples_leaf: 10
 
 compute:
-  n_workers: 20      # parallel ensemble/RC workers
-  inner_n_jobs: 5    # threads per RF/CausalForest fit (n_workers * inner_n_jobs <= total CPUs)
+  n_workers: 10      # parallel ensemble/RC workers; inner threading auto-computed as cpu_count // n_workers
 
 ensemble:
   run: true

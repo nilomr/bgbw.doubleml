@@ -17,18 +17,17 @@ Grid-cell point estimates are medians across members; 80% CIs use the
 Parallelism
 -----------
 When ``cfg.n_workers > 1`` ensemble members run in parallel via
-``joblib`` (``loky`` backend, one process per worker). Each worker owns a
-single pipeline fit, and inner forest threading is throttled to
-``cfg.inner_n_jobs`` so we don't oversubscribe CPUs. RAM scales with
-``n_workers`` because each worker holds its own copy of the dataframe;
-size the cluster job accordingly.
+``joblib`` (``loky`` backend, one process per worker). Threading per worker
+is computed automatically as ``cpu_count // n_workers`` via
+``RunConfig.effective_n_jobs`` so the whole node is always saturated.
+RAM scales with ``n_workers`` because each worker holds its own copy of the
+dataframe; size the cluster job accordingly.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -110,21 +109,6 @@ def split_cell_years(
 # ── Worker ────────────────────────────────────────────────────────────────
 
 
-def _resolve_inner_n_jobs(cfg: RunConfig) -> int:
-    """When running an outer process pool, throttle inner threading.
-
-    -1 from cfg means "use all cores", but with ``n_workers > 1`` that
-    over-subscribes the machine. We divide the available cores across
-    workers and keep at least one thread per worker.
-    """
-    if cfg.n_workers <= 1:
-        return cfg.inner_n_jobs
-    if cfg.inner_n_jobs > 0:
-        return cfg.inner_n_jobs
-    cpus = os.cpu_count() or 1
-    return max(1, cpus // max(cfg.n_workers, 1))
-
-
 def _ensemble_member(
     df: pd.DataFrame,
     cfg: RunConfig,
@@ -134,6 +118,7 @@ def _ensemble_member(
     member_idx: int,
     split_seed: int,
     fit_seed: int,
+    n_jobs: int,
 ) -> dict | None:
     """Fit one ensemble member; return the per-member arrays or None on failure.
 
@@ -150,6 +135,7 @@ def _ensemble_member(
             grid=grid,
             reference_effort=reference_effort,
             seed=fit_seed,
+            n_jobs=n_jobs,
         )
         assert isinstance(result, SpeciesPrediction)
         return {
@@ -210,25 +196,26 @@ def fit_ensemble_trend(
     seed_seq = np.random.SeedSequence(seed)
     child_seeds = seed_seq.spawn(n_ensemble)
 
-    # Throttle inner-forest threading so ``n_workers`` parallel processes
-    # don't oversubscribe the machine.
-    worker_cfg = replace(cfg, inner_n_jobs=_resolve_inner_n_jobs(cfg))
+    n_workers = max(1, cfg.n_workers)
+    # Each worker gets cpu_count // n_workers threads so the full node is
+    # always saturated without over-subscription.
+    worker_n_jobs = cfg.effective_n_jobs(n_workers)
 
     jobs = [
         (
             df,
-            worker_cfg,
+            cfg,
             species,
             grid,
             reference_effort,
             i,
             int(child_seeds[i].generate_state(1)[0]),
             seed + i,
+            worker_n_jobs,
         )
         for i in range(n_ensemble)
     ]
 
-    n_workers = max(1, cfg.n_workers)
     if n_workers == 1:
         results = []
         for args in jobs:
@@ -238,10 +225,10 @@ def fit_ensemble_trend(
         from joblib import Parallel, delayed
 
         logger.info(
-            "Ensemble: %d members  •  %d parallel workers  •  inner_n_jobs=%d",
+            "Ensemble: %d members  •  %d parallel workers  •  %d threads/worker",
             n_ensemble,
             n_workers,
-            worker_cfg.inner_n_jobs,
+            worker_n_jobs,
         )
         results = Parallel(n_jobs=n_workers, backend="loky", verbose=0)(
             delayed(_ensemble_member)(*args) for args in jobs

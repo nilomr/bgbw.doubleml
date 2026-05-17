@@ -45,6 +45,7 @@ console = Console(theme=_THEME, highlight=False)
 
 # ── Logging integration ───────────────────────────────────────────────────────
 
+
 def setup_rich_logging(level: int = logging.INFO) -> None:
     """Replace the root logging handler with a Rich handler."""
     logging.basicConfig(
@@ -65,12 +66,14 @@ def setup_rich_logging(level: int = logging.INFO) -> None:
 
 # ── Section headers ───────────────────────────────────────────────────────────
 
+
 def section(title: str) -> None:
     """Print a section rule."""
     console.print(Rule(f"[step]{title}[/step]", style="dim"))
 
 
 # ── Progress bar factory ──────────────────────────────────────────────────────
+
 
 def make_progress() -> Progress:
     """Standard pipeline progress bar with spinner, bar, counts, and time."""
@@ -100,6 +103,7 @@ def make_spinner() -> Progress:
 
 # ── Timed spinner context ─────────────────────────────────────────────────────
 
+
 @contextmanager
 def timed_step(description: str) -> Generator[None, None, None]:
     """Context manager: show a spinner while work runs, then print elapsed."""
@@ -113,6 +117,7 @@ def timed_step(description: str) -> Generator[None, None, None]:
 
 
 # ── Result tables ─────────────────────────────────────────────────────────────
+
 
 def print_trend_table(
     rows: Sequence[tuple[str, str, float, float, float, float, float]],
@@ -153,7 +158,9 @@ def print_trend_table(
     console.print(table)
 
 
-def print_sdm_table(rows: Sequence[tuple], title: str = "Pipeline RF diagnostics") -> None:
+def print_sdm_table(
+    rows: Sequence[tuple], title: str = "Pipeline RF diagnostics"
+) -> None:
     """Print pipeline RF diagnostic metrics.
 
     Each row: (species, role, metric, value).  ``role`` should be one of the
@@ -228,12 +235,23 @@ def print_rc_summary(rc: object) -> None:
 
 def print_config_panel(cfg: object, run_ensemble: bool) -> None:
     """Print a configuration summary panel."""
+    import os
+
+    _cpus = os.cpu_count() or 1
+    _nw: int = getattr(cfg, "n_workers", 1)
+    if _nw <= 1:
+        par_str = f"1 worker  \u2022  {_cpus} threads (all cores)"
+    else:
+        _per = max(1, _cpus // _nw)
+        par_str = f"{_nw} workers  \u2022  {_per} threads/worker  ({_nw * _per}/{_cpus} cores)"
     lines = [
         f"[dim]Species:[/dim]       {', '.join(cfg.species)}",  # type: ignore[attr-defined]
         f"[dim]Years:[/dim]         {cfg.years[0]}-{cfg.years[-1]}",  # type: ignore[attr-defined]
         f"[dim]PCA components:[/dim] {cfg.n_pca_components} per stat group",  # type: ignore[attr-defined]
         f"[dim]RF estimators:[/dim] {cfg.n_estimators} (nuisance)  {cfg.cf_n_estimators} (causal forest)",  # type: ignore[attr-defined]
-        f"[dim]Parallelism:[/dim]   {cfg.n_workers} worker(s)  •  inner_n_jobs={cfg.inner_n_jobs}",  # type: ignore[attr-defined]
+        f"[dim]Parallelism:[/dim]   {par_str}",
         f"[dim]Ensemble:[/dim]      {'enabled' if run_ensemble else 'disabled'}",
     ]
-    console.print(Panel("\n".join(lines), title="[step]Configuration[/step]", expand=False))
+    console.print(
+        Panel("\n".join(lines), title="[step]Configuration[/step]", expand=False)
+    )

@@ -93,7 +93,7 @@ def _r2_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
 # ── RF factory + OOB fit ──────────────────────────────────────────────────
 
 
-def _make_rf(cfg: RunConfig):
+def _make_rf(cfg: RunConfig, n_jobs: int = -1):
     """Random Forest for nuisance models (marginal response + propensity).
 
     Mirrors ``grf::regression_forest`` with ``tune.parameters="all"`` in
@@ -107,9 +107,9 @@ def _make_rf(cfg: RunConfig):
     out-of-bag estimates, matching grf's native OOB behaviour — 1 fit
     per nuisance, no separate K-fold cross-fit required.
 
-    ``cfg.inner_n_jobs`` controls per-fit threading. Use 1 when an outer
-    process pool (ensemble / residual-confounding) already saturates
-    the machine, to avoid CPU oversubscription.
+    ``n_jobs`` controls per-fit threading and is supplied by the caller;
+    it is computed automatically from ``RunConfig.effective_n_jobs`` so
+    the whole node is saturated without over-subscription.
     """
     return _RF(
         n_estimators=cfg.n_estimators,
@@ -117,7 +117,7 @@ def _make_rf(cfg: RunConfig):
         max_features="sqrt",
         bootstrap=True,
         oob_score=True,
-        n_jobs=cfg.inner_n_jobs,
+        n_jobs=n_jobs,
     )
 
 
@@ -132,6 +132,7 @@ def _fit_nuisance(
     cfg: RunConfig,
     *,
     seed: int,
+    n_jobs: int = -1,
 ):
     """Fit a nuisance RF and return ``(model, oof_predictions)``.
 
@@ -141,7 +142,7 @@ def _fit_nuisance(
     nuisance fits but is not used — sklearn RF is seeded via ``RunConfig``
     or left as the global numpy RNG.
     """
-    model = _make_rf(cfg)
+    model = _make_rf(cfg, n_jobs=n_jobs)
     model.fit(X, y)
     oob = np.asarray(model.oob_prediction_, dtype=np.float64).ravel()
     bad = ~np.isfinite(oob)
@@ -353,6 +354,7 @@ def train_predict_species(
     seed: int = 0,
     compute_variance: bool = False,
     return_models: bool = False,
+    n_jobs: int = -1,
 ) -> "SpeciesPrediction | tuple[SpeciesPrediction, TrainedSpeciesModels]":
     """Fit the two-part DML trend + SDM for one species.
 
@@ -384,6 +386,10 @@ def train_predict_species(
         embeddings + lat/lon (Fink §3.3).
     seed
         Random seed for the causal forest.
+    n_jobs
+        Threads per RF / CausalForest fit.  Pass ``cfg.effective_n_jobs(1)``
+        for a solo run (all cores) or ``cfg.effective_n_jobs(n_workers)``
+        inside an ensemble / RC worker pool.  Defaults to -1 (all cores).
     compute_variance
         If True, call ``CausalForest.predict_and_var`` on the grid to
         populate ``occ_sigma`` / ``count_sigma``. This is expensive at
@@ -423,9 +429,11 @@ def train_predict_species(
         X_prop_occ = _assemble_X(df_occ, propensity_covariates)
     W_occ = _assemble_W(df_occ, treatment_covariates)
 
-    y_bin_forest, Y_bin_hat = _fit_nuisance(X_marg_occ, Y_bin, cfg, seed=seed)
+    y_bin_forest, Y_bin_hat = _fit_nuisance(
+        X_marg_occ, Y_bin, cfg, seed=seed, n_jobs=n_jobs
+    )
     Y_bin_hat = np.clip(Y_bin_hat, 0.0, 1.0)
-    _, W_bin_hat = _fit_nuisance(X_prop_occ, T_occ, cfg, seed=seed + 1)
+    _, W_bin_hat = _fit_nuisance(X_prop_occ, T_occ, cfg, seed=seed + 1, n_jobs=n_jobs)
 
     # Causal forest on residuals → τ_occ(W). econml's CausalForest does
     # not accept pre-computed Y.hat / W.hat (unlike grf), so we pass
@@ -437,7 +445,7 @@ def train_predict_species(
         honest=True,
         inference=True,
         random_state=seed,
-        n_jobs=cfg.inner_n_jobs,
+        n_jobs=n_jobs,
     )
     bin_cf.fit(X=W_occ, T=(T_occ - W_bin_hat), y=(Y_bin - Y_bin_hat))
 
@@ -464,8 +472,12 @@ def train_predict_species(
         X_prop_count = _assemble_X(dc, propensity_covariates)
     W_count = _assemble_W(dc, treatment_covariates)
 
-    y_count_forest, Y_count_hat = _fit_nuisance(X_marg_count, Y_log, cfg, seed=seed + 2)
-    _, W_count_hat = _fit_nuisance(X_prop_count, T_count, cfg, seed=seed + 3)
+    y_count_forest, Y_count_hat = _fit_nuisance(
+        X_marg_count, Y_log, cfg, seed=seed + 2, n_jobs=n_jobs
+    )
+    _, W_count_hat = _fit_nuisance(
+        X_prop_count, T_count, cfg, seed=seed + 3, n_jobs=n_jobs
+    )
 
     count_r2, count_rmse = _r2_rmse(Y_log, Y_count_hat)
     prop_occ_r2, prop_occ_rmse = _r2_rmse(T_occ, W_bin_hat)
@@ -489,7 +501,7 @@ def train_predict_species(
         honest=True,
         inference=True,
         random_state=seed,
-        n_jobs=cfg.inner_n_jobs,
+        n_jobs=n_jobs,
     )
     count_cf.fit(X=W_count, T=(T_count - W_count_hat), y=(Y_log - Y_count_hat))
 

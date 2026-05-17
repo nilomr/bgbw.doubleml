@@ -40,7 +40,7 @@ from bgbw_trends.pipeline import (
     _predict,
     train_predict_species,
 )
-from bgbw_trends.trends.ensemble import _resolve_inner_n_jobs, split_cell_years
+from bgbw_trends.trends.ensemble import split_cell_years
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,7 @@ def _null_species_values(
     species: str,
     cfg: RunConfig,
     rng: np.random.Generator,
+    n_jobs: int = -1,
 ) -> np.ndarray:
     """Regenerate the species column under a zero-trend DGP.
 
@@ -105,7 +106,7 @@ def _null_species_values(
 
     y_bin = (df[species] > 0).to_numpy(dtype=np.float64)
     _occ_forest, p_hat = _fit_nuisance(
-        X, y_bin, null_cfg, seed=int(rng.integers(0, 2**31))
+        X, y_bin, null_cfg, seed=int(rng.integers(0, 2**31)), n_jobs=n_jobs
     )
     p_hat = np.clip(p_hat, 0.0, 1.0)
     y_bin_null = rng.binomial(1, p_hat).astype(np.float64)
@@ -118,7 +119,11 @@ def _null_species_values(
     Y_log = np.log1p(df.loc[orig_detected, species].to_numpy(dtype=np.float64))
     X_det = X.iloc[orig_detected.nonzero()[0]].reset_index(drop=True)
     _count_forest, m_count_oof = _fit_nuisance(
-        X_det, Y_log, null_cfg, seed=int(rng.integers(0, 2**31)),
+        X_det,
+        Y_log,
+        null_cfg,
+        seed=int(rng.integers(0, 2**31)),
+        n_jobs=n_jobs,
     )
     resid_sd = float(np.std(Y_log - m_count_oof, ddof=0))
 
@@ -142,6 +147,7 @@ def _one_null_simulation(
     reference_effort: ReferenceEffort,
     sim_idx: int,
     sim_seed: int,
+    n_jobs: int,
 ) -> dict | None:
     """One null-trend simulation (§2.2).
 
@@ -164,7 +170,7 @@ def _one_null_simulation(
     null_df = df.iloc[boot_idx].reset_index(drop=True)
 
     # Step 2 — zero-trend DGP
-    null_df[species] = _null_species_values(null_df, species, cfg, rng)
+    null_df[species] = _null_species_values(null_df, species, cfg, rng, n_jobs=n_jobs)
 
     # Step 3 — 50/50 split matching ensemble, refit pipeline
     occ_df, count_df = split_cell_years(null_df, rng)
@@ -178,6 +184,7 @@ def _one_null_simulation(
             grid=grid,
             reference_effort=reference_effort,
             seed=int(rng.integers(0, 2**31)),
+            n_jobs=n_jobs,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("Null sim %d failed: %s", sim_idx, e)
@@ -226,31 +233,41 @@ def diagnose_residual_confounding(
     """
     logger.info(
         "Residual confounding null diagnostic [%s]: %d simulation(s)",
-        species, n_simulations,
+        species,
+        n_simulations,
     )
 
     seed_seq = np.random.SeedSequence(seed)
     child_seeds = seed_seq.spawn(n_simulations)
 
-    worker_cfg = replace(cfg, inner_n_jobs=_resolve_inner_n_jobs(cfg))
+    n_workers = max(1, cfg.n_workers)
+    # Each worker gets cpu_count // n_workers threads so the full node is
+    # always saturated without over-subscription.
+    worker_n_jobs = cfg.effective_n_jobs(n_workers)
 
     jobs = [
         (
-            df, species, worker_cfg, grid, reference_effort,
+            df,
+            species,
+            cfg,
+            grid,
+            reference_effort,
             i,
             int(child_seeds[i].generate_state(1)[0]),
+            worker_n_jobs,
         )
         for i in range(n_simulations)
     ]
 
-    n_workers = max(1, cfg.n_workers)
     if n_workers == 1:
         results_raw = [_one_null_simulation(*args) for args in jobs]
     else:
         from joblib import Parallel, delayed
+
         logger.info(
-            "RC null sims: %d parallel workers  •  inner_n_jobs=%d",
-            n_workers, worker_cfg.inner_n_jobs,
+            "RC null sims: %d parallel workers  •  %d threads/worker",
+            n_workers,
+            worker_n_jobs,
         )
         results_raw = Parallel(n_jobs=n_workers, backend="loky", verbose=0)(
             delayed(_one_null_simulation)(*args) for args in jobs
@@ -268,13 +285,17 @@ def diagnose_residual_confounding(
         n_ok += 1
         bng_ref = result["bng_ref"]
         n_cells = len(bng_ref)
-        sim_records.append(pd.DataFrame({
-            "sim_idx": np.full(n_cells, sim_idx, dtype=np.int32),
-            "bng_ref": bng_ref,
-            "occ_ppy": result["occ_ppy"],
-            "count_ppy": result["count_ppy"],
-            "abd_ppy": result["abd_ppy"],
-        }))
+        sim_records.append(
+            pd.DataFrame(
+                {
+                    "sim_idx": np.full(n_cells, sim_idx, dtype=np.int32),
+                    "bng_ref": bng_ref,
+                    "occ_ppy": result["occ_ppy"],
+                    "count_ppy": result["count_ppy"],
+                    "abd_ppy": result["abd_ppy"],
+                }
+            )
+        )
         ate_occ_list.append(result["ate_occ"])
         ate_count_list.append(result["ate_count"])
         abd_median_list.append(result["abd_median"])
@@ -309,7 +330,8 @@ def diagnose_residual_confounding(
         float(np.std(sim_ate_count)) if n_ok > 1 else 0.0,
         bias_ate_abd,
         float(np.std(sim_ate_abd)) if n_ok > 1 else 0.0,
-        n_ok, n_simulations,
+        n_ok,
+        n_simulations,
     )
 
     return ResidualConfoundingResult(

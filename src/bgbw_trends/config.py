@@ -294,18 +294,25 @@ class RunConfig:
     reference_effort: ReferenceEffort = field(default_factory=ReferenceEffort)
 
     # Parallelization
-    # ``n_workers``  — outer (process-level) parallelism for the ensemble and
-    # residual-confounding loops. Each worker fits the full two-part pipeline.
-    # 1 = sequential. -1 = all cores. On a workstation, prefer 1 (the inner
-    # forests already use all threads). On a cluster node, set ``n_workers``
-    # to the number of pipeline replicas you can run concurrently and
-    # ``inner_n_jobs`` to ``cores // n_workers`` to avoid CPU thrashing.
+    # ``n_workers`` — outer (process-level) parallelism for the ensemble and
+    # residual-confounding loops. Each worker owns one full pipeline fit.
+    # 1 = sequential; the solo fit automatically gets all cores.
+    # On a cluster node raise this to min(n_ensemble, n_rc_sims); inner
+    # threading is computed automatically as cpu_count // n_workers so
+    # the full node is always saturated without manual tuning.
+    # RAM scales with n_workers — size the job accordingly.
     n_workers: int = 1
-    # ``inner_n_jobs`` — threads per individual RF / CausalForest fit.
-    # -1 = all cores (sklearn default). When ``n_workers > 1``, set to
-    # ``max(1, cores // n_workers)`` to give each replica its own slice
-    # of the machine and avoid oversubscription.
-    inner_n_jobs: int = -1
+
+    def effective_n_jobs(self, n_outer: int = 1) -> int:
+        """Threads to assign per RF / CausalForest fit.
+
+        ``n_outer`` is the number of concurrent outer pipeline processes in
+        this context (1 for a solo fit, ``cfg.n_workers`` inside an
+        ensemble/RC worker pool).  Returns ``max(1, cpu_count // n_outer)``
+        so the whole node is always saturated without over-subscription.
+        """
+        cpus = os.cpu_count() or 1
+        return max(1, cpus // max(1, n_outer))
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
