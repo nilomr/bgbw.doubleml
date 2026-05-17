@@ -227,6 +227,7 @@ def _one_null_simulation(
     sim_idx: int,
     sim_seed: int,
     n_jobs: int,
+    n_total: int = 0,
 ) -> dict | None:
     """One null-trend simulation (§2.2).
 
@@ -236,6 +237,8 @@ def _one_null_simulation(
       abd_median                             (range-wide median abd_ppy)
     or None on failure.
     """
+    label = f"{sim_idx + 1}/{n_total}" if n_total else str(sim_idx + 1)
+    logger.info("Null sim %s starting [%s]", label, species)
     rng = np.random.default_rng(sim_seed)
     years = df["year"].to_numpy()
     unique_years = np.unique(years)
@@ -266,9 +269,10 @@ def _one_null_simulation(
             n_jobs=n_jobs,
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning("Null sim %d failed: %s", sim_idx, e)
+        logger.warning("Null sim %s failed [%s]: %s", label, species, e)
         return None
 
+    logger.info("Null sim %s done [%s]", label, species)
     return {
         "bng_ref": pred.bng_ref,
         "occ_ppy": pred.occ_ppy,
@@ -319,9 +323,10 @@ def diagnose_residual_confounding(
     seed_seq = np.random.SeedSequence(seed)
     child_seeds = seed_seq.spawn(n_simulations)
 
-    n_workers = max(1, cfg.n_workers)
-    # Each worker gets cpu_count // n_workers threads so the full node is
-    # always saturated without over-subscription.
+    # Cap workers to the number of jobs — joblib spawns min(n_jobs, len(tasks))
+    # processes, so requesting more workers than tasks causes inner threads to be
+    # under-provisioned (cpu_count // n_workers instead of cpu_count // actual_workers).
+    n_workers = min(max(1, cfg.n_workers), n_simulations)
     worker_n_jobs = cfg.effective_n_jobs(n_workers)
 
     jobs = [
@@ -334,6 +339,7 @@ def diagnose_residual_confounding(
             i,
             int(child_seeds[i].generate_state(1)[0]),
             worker_n_jobs,
+            n_simulations,
         )
         for i in range(n_simulations)
     ]

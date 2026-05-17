@@ -332,12 +332,15 @@ node for a publication-grade run.
 
 Both honour `RunConfig.n_workers`:
 
-- `n_workers=1` (**default**) — sequential. Each fit gets all cores via
-  `inner_n_jobs=-1`. The right setting on a laptop or any single-node run
-  where RAM is constrained.
+- `n_workers=1` (**default**) — sequential. Each fit gets all cores. The
+  right setting on a laptop or any single-node run where RAM is constrained.
 - `n_workers>1` — process-level parallelism via `joblib(loky)`. Each
-  worker runs one full pipeline; `inner_n_jobs` is auto-throttled to
-  `cores // n_workers` (override with `RunConfig.inner_n_jobs > 0`).
+  worker runs one full pipeline; inner threading is auto-set to
+  `cpu_count // actual_workers` where `actual_workers = min(n_workers, n_tasks)`.
+  The cap means setting `n_workers=20` with only 10 ensemble members is
+  equivalent to `n_workers=10` — no under-provisioning of inner threads.
+  Override inner threads explicitly with `RunConfig.inner_n_jobs > 0` (or
+  `compute.inner_n_jobs` in the YAML).
   Speedup is near-linear in workers; **RAM scales with `n_workers`**
   because every worker holds its own copy of the dataframe — only enable
   on a machine sized for it (cluster nodes, big workstations).

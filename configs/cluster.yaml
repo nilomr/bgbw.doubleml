@@ -19,7 +19,12 @@ model:
   cf_min_samples_leaf: 10
 
 compute:
-  n_workers: 10      # parallel ensemble/RC workers; inner threading auto-computed as cpu_count // n_workers
+  # n_workers: parallel workers for ensemble and RC loops.
+  # Set to min(n_ensemble, n_rc_sims) — values higher than the task count are
+  # automatically clamped, and inner threading is auto-set to cpu_count // n_workers.
+  # Rule of thumb: n_workers = n_ensemble = n_rc_sims saturates the node cleanly.
+  # inner_n_jobs: 0  # 0 = auto; set >0 to override threads per fit
+  n_workers: 10
 
 ensemble:
   run: true

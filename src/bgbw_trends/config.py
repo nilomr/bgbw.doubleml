@@ -297,20 +297,29 @@ class RunConfig:
     # ``n_workers`` — outer (process-level) parallelism for the ensemble and
     # residual-confounding loops. Each worker owns one full pipeline fit.
     # 1 = sequential; the solo fit automatically gets all cores.
-    # On a cluster node raise this to min(n_ensemble, n_rc_sims); inner
-    # threading is computed automatically as cpu_count // n_workers so
-    # the full node is always saturated without manual tuning.
+    # Set to min(n_ensemble, n_rc_sims) to saturate the node; inner threading
+    # is computed automatically as cpu_count // n_workers. Values higher than
+    # the number of tasks are silently clamped to the task count, so setting
+    # n_workers=20 with n_ensemble=10 is equivalent to n_workers=10.
     # RAM scales with n_workers — size the job accordingly.
     n_workers: int = 1
+
+    # ``inner_n_jobs`` — threads per RF / CausalForest fit.
+    # 0 (default) = auto: cpu_count // n_workers.  Set >0 to override,
+    # e.g. inner_n_jobs=4 on a hyperthreaded node where physical-core count
+    # matters more than logical-core count.
+    inner_n_jobs: int = 0
 
     def effective_n_jobs(self, n_outer: int = 1) -> int:
         """Threads to assign per RF / CausalForest fit.
 
         ``n_outer`` is the number of concurrent outer pipeline processes in
-        this context (1 for a solo fit, ``cfg.n_workers`` inside an
+        this context (1 for a solo fit, actual worker count inside an
         ensemble/RC worker pool).  Returns ``max(1, cpu_count // n_outer)``
-        so the whole node is always saturated without over-subscription.
+        unless ``inner_n_jobs > 0``, in which case that explicit value is used.
         """
+        if self.inner_n_jobs > 0:
+            return self.inner_n_jobs
         cpus = os.cpu_count() or 1
         return max(1, cpus // max(1, n_outer))
 

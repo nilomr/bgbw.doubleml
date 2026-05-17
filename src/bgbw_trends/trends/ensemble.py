@@ -17,11 +17,12 @@ Grid-cell point estimates are medians across members; 80% CIs use the
 Parallelism
 -----------
 When ``cfg.n_workers > 1`` ensemble members run in parallel via
-``joblib`` (``loky`` backend, one process per worker). Threading per worker
-is computed automatically as ``cpu_count // n_workers`` via
-``RunConfig.effective_n_jobs`` so the whole node is always saturated.
-RAM scales with ``n_workers`` because each worker holds its own copy of the
-dataframe; size the cluster job accordingly.
+``joblib`` (``loky`` backend, one process per worker). Actual workers are
+``min(n_workers, n_ensemble)`` — requesting more workers than tasks would
+otherwise under-provision inner threads. Threading per worker is then
+``cpu_count // actual_workers`` via ``RunConfig.effective_n_jobs``,
+saturating the node. RAM scales with actual workers; size the cluster job
+accordingly.
 """
 
 from __future__ import annotations
@@ -119,11 +120,14 @@ def _ensemble_member(
     split_seed: int,
     fit_seed: int,
     n_jobs: int,
+    n_total: int = 0,
 ) -> dict | None:
     """Fit one ensemble member; return the per-member arrays or None on failure.
 
     Top-level (not nested) so it pickles cleanly for ``loky`` workers.
     """
+    label = f"{member_idx + 1}/{n_total}" if n_total else str(member_idx + 1)
+    logger.info("Ensemble member %s starting [%s]", label, species)
     try:
         rng = np.random.default_rng(split_seed)
         occ_df, count_df = split_cell_years(df, rng)
@@ -138,6 +142,7 @@ def _ensemble_member(
             n_jobs=n_jobs,
         )
         assert isinstance(result, SpeciesPrediction)
+        logger.info("Ensemble member %s done [%s]", label, species)
         return {
             "bng_ref": result.bng_ref,
             "occ_ppy": result.occ_ppy,
@@ -147,7 +152,7 @@ def _ensemble_member(
             "e_abundance": result.e_abundance,
         }
     except Exception as e:  # noqa: BLE001 — isolate failing members
-        logger.warning("Ensemble member %d failed: %s", member_idx + 1, e)
+        logger.warning("Ensemble member %s failed [%s]: %s", label, species, e)
         return None
 
 
@@ -196,9 +201,10 @@ def fit_ensemble_trend(
     seed_seq = np.random.SeedSequence(seed)
     child_seeds = seed_seq.spawn(n_ensemble)
 
-    n_workers = max(1, cfg.n_workers)
-    # Each worker gets cpu_count // n_workers threads so the full node is
-    # always saturated without over-subscription.
+    # Cap workers to the number of jobs — joblib spawns min(n_jobs, len(tasks))
+    # processes, so requesting more workers than tasks causes inner threads to be
+    # under-provisioned (cpu_count // n_workers instead of cpu_count // actual_workers).
+    n_workers = min(max(1, cfg.n_workers), n_ensemble)
     worker_n_jobs = cfg.effective_n_jobs(n_workers)
 
     jobs = [
@@ -212,15 +218,13 @@ def fit_ensemble_trend(
             int(child_seeds[i].generate_state(1)[0]),
             seed + i,
             worker_n_jobs,
+            n_ensemble,
         )
         for i in range(n_ensemble)
     ]
 
     if n_workers == 1:
-        results = []
-        for args in jobs:
-            logger.info("Ensemble member %d/%d", args[5] + 1, n_ensemble)
-            results.append(_ensemble_member(*args))
+        results = [_ensemble_member(*args) for args in jobs]
     else:
         from joblib import Parallel, delayed
 
