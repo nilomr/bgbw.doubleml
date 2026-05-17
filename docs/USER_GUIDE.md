@@ -6,20 +6,21 @@ How to set up, configure, and run the current pipeline implementation.
 
 ## 1. Data requirements
 
-The pipeline currently reads from five external sources:
+The pipeline currently reads from four external sources:
 
 | Source | Expected files |
 |---|---|
 | Harmonized surveys | `bgbw_{year}.parquet` — individual-level BGBW submissions |
-| BNG-aggregated surveys | `bng1km_surveys_{year}.parquet` — one row per (cell, year) |
 | Geospatial embeddings | `aef_bng1km_{year}_uk.parquet` — one row per 1 km BNG cell |
 | Survey-weekend weather | HadUK-Grid parquet |
 | January weather | HadUK-Grid parquet |
 
 See the project kanban for the current status of these variables and others in progress or under consideration.
 
-Harmonized and BNG-aggregated files are produced by the BGBW data pipeline
-repo (`bgbw.data.pipeline`). Set the paths in your config file (see §2).
+Harmonized survey files are produced by the BGBW data pipeline repo
+(`bgbw.data.pipeline`). The trends pipeline aggregates them to 1 km BNG
+cells at runtime, then joins embeddings and weather. Set the paths in your
+config file (see §2).
 
 ---
 
@@ -37,7 +38,6 @@ Copy either file to create a new experiment config. The sections are:
 ```yaml
 paths:                        # data locations — edit per machine
   harmonized_dir: /data/bgbw/harmonized
-  bng_surveys_dir: /data/bgbw/bng_surveys
   aef_dir: /data/bgbw/aef
   weather_path: /data/bgbw/weather/bgbw_weather.parquet
   january_weather_path: /data/bgbw/weather/bgbw_january_weather.parquet
@@ -191,9 +191,9 @@ The default config uses every other year (2017, 2019, 2021, 2023) for speed;
 set `years: [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]` in your config
 for the full annual run. To extend the time series:
 
-1. Produce harmonized and BNG-aggregated parquets for the new year(s) using
-   the data pipeline repo and place them in the directories listed under
-   `paths` in your config.
+1. Produce harmonized survey parquets for the new year(s) using the data
+  pipeline repo and place them in the directory listed under `paths` in
+  your config.
 2. Add the new year(s) to `run.years` in your config.
 3. For study periods beyond roughly five years, consider switching to per-year
    embeddings — the current multi-year mean is adequate for short spans but

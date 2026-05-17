@@ -1,7 +1,7 @@
 """Data loading and assembly for the BGBW DML trend pipeline.
 
-Provides functions to load individual-level survey data, grid-aggregated
-surveys, and geospatial embeddings, and to assemble them into analysis-ready
+Provides functions to load individual-level survey data, geospatial
+embeddings, weather covariates, and to assemble them into analysis-ready
 DataFrames keyed by (bng_ref, year).
 """
 
@@ -18,7 +18,6 @@ from osbng.indexing import xy_to_bng
 from bgbw_trends.aggregate import BNG_RESOLUTION
 from bgbw_trends.config import (
     AEF_DIR,
-    BNG_SURVEYS_DIR,
     HARMONIZED_DIR,
     JANUARY_WEATHER_PATH,
     WEATHER_PATH,
@@ -38,19 +37,6 @@ def load_harmonized(year: int, directory: Path = HARMONIZED_DIR) -> pd.DataFrame
         raise FileNotFoundError(f"No harmonized data for {year}: {path}")
     df = pd.read_parquet(path)
     logger.info("Loaded harmonized %d: %d surveys", year, len(df))
-    return df
-
-
-def load_bng_surveys(year: int, directory: Path = BNG_SURVEYS_DIR) -> pd.DataFrame:
-    """Load grid-aggregated (1 km BNG) survey data for a single year."""
-    path = directory / f"bng1km_surveys_{year}.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"No BNG survey data for {year}: {path}")
-    df = pd.read_parquet(path)
-    # Drop the WKB geometry column — we join spatially via bng_ref
-    if "geometry" in df.columns:
-        df = df.drop(columns=["geometry"])
-    logger.info("Loaded BNG surveys %d: %d grid cells", year, len(df))
     return df
 
 
@@ -322,19 +308,6 @@ def load_january_weather(
 
 
 # ── Assembly ────────────────────────────────────────────────────────────────
-
-
-def load_multi_year_bng(
-    years: list[int], directory: Path = BNG_SURVEYS_DIR
-) -> pd.DataFrame:
-    """Stack BNG-aggregated surveys across multiple years."""
-    frames = []
-    for y in years:
-        df = load_bng_surveys(y, directory)
-        frames.append(df)
-    result = pd.concat(frames, ignore_index=True)
-    logger.info("Stacked BNG surveys: %d rows across %d years", len(result), len(years))
-    return result
 
 
 def assemble_analysis_data(cfg: RunConfig) -> pd.DataFrame:

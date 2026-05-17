@@ -1,7 +1,6 @@
 paths:
   # Update these to match the actual paths on the cluster
   harmonized_dir: /data/bgbw/harmonized
-  bng_surveys_dir: /data/bgbw/bng_surveys
   aef_dir: /data/BS/userdata/nilo/projects/BGBW/data/metadata/spatial/aef/
   weather_path: /data/bgbw/weather/bgbw_weather.parquet
   january_weather_path: /data/bgbw/weather/bgbw_january_weather.parquet

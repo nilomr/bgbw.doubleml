@@ -37,7 +37,6 @@ import yaml
 
 _PATH_ENV_KEYS = {
     "harmonized_dir": "BGBW_HARMONIZED_DIR",
-    "bng_surveys_dir": "BGBW_BNG_SURVEYS_DIR",
     "aef_dir": "BGBW_AEF_DIR",
     "weather_path": "BGBW_WEATHER_PATH",
     "january_weather_path": "BGBW_JANUARY_WEATHER_PATH",
@@ -49,7 +48,9 @@ def _bootstrap() -> tuple[Path, dict]:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("config", type=Path, help="Path to a YAML config file (see configs/).")
+    p.add_argument(
+        "config", type=Path, help="Path to a YAML config file (see configs/)."
+    )
     args = p.parse_args()
     if not args.config.exists():
         p.error(f"Config file not found: {args.config}")
@@ -90,7 +91,11 @@ def main() -> None:
     from bgbw_trends.data import assemble_analysis_data
     from bgbw_trends.features.effort import compute_reference_effort
     from bgbw_trends.features.habitat import reduce_embeddings_pca
-    from bgbw_trends.interpret import explain_cate_surrogate, explain_tree_model, plot_shap_panel
+    from bgbw_trends.interpret import (
+        explain_cate_surrogate,
+        explain_tree_model,
+        plot_shap_panel,
+    )
     from bgbw_trends.pipeline import train_predict_species
     from bgbw_trends.plotting import (
         plot_prediction_distribution_summary,
@@ -100,7 +105,11 @@ def main() -> None:
         plot_yearly_trend,
     )
     import json
-    from bgbw_trends.trends import diagnose_residual_confounding, fit_ensemble_trend, split_cell_years
+    from bgbw_trends.trends import (
+        diagnose_residual_confounding,
+        fit_ensemble_trend,
+        split_cell_years,
+    )
     from bgbw_trends.trends.residual_confounding import DEFAULT_RC_SCENARIOS
     import matplotlib.pyplot as plt
 
@@ -148,7 +157,9 @@ def main() -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(log_path)
         fh.setLevel(logging.INFO)
-        fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"))
+        fh.setFormatter(
+            logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
+        )
         logging.getLogger().addHandler(fh)
         sys.stderr.write(f"Logging to {log_path}\n")
 
@@ -314,13 +325,23 @@ def main() -> None:
         with timed_step("  SDM count SHAP  (approx, n=500 rows)"):
             count_expl = explain_tree_model(models.y_count_forest, models.X_marg_count)
         console.print(f"  [dim]{sp}[/dim]  CATE surrogate forests…")
-        with timed_step(f"  CATE occ  surrogate fit → SHAP (n={len(models.tau_occ)} rows)"):
+        with timed_step(
+            f"  CATE occ  surrogate fit → SHAP (n={len(models.tau_occ)} rows)"
+        ):
             cate_occ_expl = explain_cate_surrogate(
-                models.bin_cf, models.W_occ, models.W_feature_names, tau_hat=models.tau_occ
+                models.bin_cf,
+                models.W_occ,
+                models.W_feature_names,
+                tau_hat=models.tau_occ,
             )
-        with timed_step(f"  CATE count  surrogate fit → SHAP (n={len(models.tau_count)} rows)"):
+        with timed_step(
+            f"  CATE count  surrogate fit → SHAP (n={len(models.tau_count)} rows)"
+        ):
             cate_count_expl = explain_cate_surrogate(
-                models.count_cf, models.W_count, models.W_feature_names, tau_hat=models.tau_count
+                models.count_cf,
+                models.W_count,
+                models.W_feature_names,
+                tau_hat=models.tau_count,
             )
 
         fig = plot_shap_panel(
@@ -355,13 +376,19 @@ def main() -> None:
 
         shap_cate_path = out.species_shap_data(sp, "cate")
         pd.concat(
-            [cate_occ_expl.to_frame("cate_occ"), cate_count_expl.to_frame("cate_count")],
+            [
+                cate_occ_expl.to_frame("cate_occ"),
+                cate_count_expl.to_frame("cate_count"),
+            ],
             ignore_index=True,
         ).to_parquet(shap_cate_path)
 
         # GRF-native heterogeneity importances (unsigned, surrogate-free)
         grf_frames = []
-        for stage, expl in [("cate_occ", cate_occ_expl), ("cate_count", cate_count_expl)]:
+        for stage, expl in [
+            ("cate_occ", cate_occ_expl),
+            ("cate_count", cate_count_expl),
+        ]:
             if expl.grf_importances is not None:
                 grf_df = expl.grf_importances.copy()
                 grf_df.insert(0, "stage", stage)

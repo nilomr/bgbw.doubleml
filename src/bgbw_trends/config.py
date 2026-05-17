@@ -12,7 +12,6 @@ from pathlib import Path
 # wrapper script) before running the pipeline.
 #
 #   BGBW_HARMONIZED_DIR      — individual-level BGBW submissions (harmonized/)
-#   BGBW_BNG_SURVEYS_DIR     — cell-year aggregates (bng_surveys/)
 #   BGBW_AEF_DIR             — geospatial embedding parquets
 #   BGBW_WEATHER_PATH        — survey-weekend HadUK-Grid parquet
 #   BGBW_JANUARY_WEATHER_PATH — January HadUK-Grid parquet
@@ -20,12 +19,6 @@ HARMONIZED_DIR = Path(
     os.environ.get(
         "BGBW_HARMONIZED_DIR",
         "/home/nilomr/projects/bgbw.data.pipeline-r/output/data/harmonized",
-    )
-)
-BNG_SURVEYS_DIR = Path(
-    os.environ.get(
-        "BGBW_BNG_SURVEYS_DIR",
-        "/home/nilomr/projects/bgbw.data.pipeline-r/output/data/bng_surveys",
     )
 )
 AEF_DIR = Path(
