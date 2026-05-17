@@ -110,10 +110,9 @@ def main() -> None:
         fit_ensemble_trend,
         split_cell_years,
     )
-    from bgbw_trends.trends.residual_confounding import DEFAULT_RC_SCENARIOS
     import matplotlib.pyplot as plt
 
-    def _build_run_config(raw: dict) -> tuple[RunConfig, bool, int, int, list[float]]:
+    def _build_run_config(raw: dict) -> tuple[RunConfig, bool, int, int]:
         run = raw.get("run", {})
         model = raw.get("model", {})
         compute = raw.get("compute", {})
@@ -132,13 +131,11 @@ def main() -> None:
             n_workers=compute.get("n_workers", 1),
             inner_n_jobs=compute.get("inner_n_jobs", -1),
         )
-        rc_scenarios = ens_cfg.get("rc_scenarios", DEFAULT_RC_SCENARIOS)
         return (
             cfg,
             ens_cfg.get("run", True),
             ens_cfg.get("n_ensemble", 10),
             ens_cfg.get("n_rc_sims", 5),
-            list(rc_scenarios),
         )
 
     def _build_grid(df: pd.DataFrame) -> pd.DataFrame:
@@ -164,7 +161,7 @@ def main() -> None:
         sys.stderr.write(f"Logging to {log_path}\n")
 
     # ── Configuration ────────────────────────────────────────────────────
-    cfg, run_ensemble, n_ensemble, n_rc_sims, rc_scenarios = _build_run_config(raw)
+    cfg, run_ensemble, n_ensemble, n_rc_sims = _build_run_config(raw)
     out = cfg.output_paths()
 
     shutil.copy(_config_path, out.root / "config.yaml")
@@ -404,17 +401,13 @@ def main() -> None:
         )
 
     # ── Residual confounding calibration (Fink §3.4) ─────────────────────
-    section("Residual confounding calibration")
+    section("Residual confounding diagnostic (Fink §2.2)")
     console.print()
     rc_results: dict[str, object] = {}
     for sp in cfg.species:
-        n_scenarios = len(rc_scenarios)
-        sims_per = max(1, n_rc_sims // n_scenarios)
-        total_sims = n_scenarios * sims_per
         with make_spinner() as spin:
             spin.add_task(
-                f"RC calibration [{sp}]  "
-                f"({n_scenarios} scenarios × {sims_per} sim(s) = {total_sims} total)",
+                f"RC null sims [{sp}]  ({n_rc_sims} simulation(s))",
                 total=None,
             )
             rc = diagnose_residual_confounding(
@@ -424,27 +417,21 @@ def main() -> None:
                 grid=grid,
                 reference_effort=cfg.reference_effort,
                 n_simulations=n_rc_sims,
-                trend_scenarios=rc_scenarios,
             )
         rc_results[sp] = rc
         print_rc_summary(rc)
 
-        # Save adjustment coefficients (JSON) and per-sim per-cell data (parquet)
+        # Save null-bias summary (JSON) and per-sim per-cell data (parquet)
         rc_dir = out.species_rc_dir(sp)
         rc_dir.mkdir(parents=True, exist_ok=True)
 
         adj = {
             "species": sp,
-            "beta0": rc.beta0,
-            "beta0_se": rc.beta0_se,
-            "beta1": rc.beta1,
-            "beta1_se": rc.beta1_se,
-            "rsquared": rc.rsquared,
-            "rank_cor": rc.rank_cor,
-            "n_scenarios": rc.n_scenarios,
-            "n_sims_per_scenario": rc.n_sims_per_scenario,
+            "bias_ate_occ": rc.bias_ate_occ,
+            "bias_ate_count": rc.bias_ate_count,
+            "bias_ate_abd": rc.bias_ate_abd,
             "n_successful": rc.n_successful,
-            "trend_scenarios": rc_scenarios,
+            "n_simulations": n_rc_sims,
         }
         with open(out.species_rc_adjustment_file(sp), "w") as f:
             json.dump(adj, f, indent=2)
@@ -453,8 +440,8 @@ def main() -> None:
             rc.sim_df.to_parquet(out.species_rc_simulations_file(sp), index=False)
 
         console.print(
-            f"  [dim]{sp}: β₀={rc.beta0:+.4f}  β₁={rc.beta1:.4f}  "
-            f"R²={rc.rsquared:.3f}  n={rc.n_successful}[/dim]"
+            f"  [dim]{sp}: bias_abd={rc.bias_ate_abd:+.4f}"
+            f"  n={rc.n_successful}/{n_rc_sims}[/dim]"
         )
 
     # ── Ensemble (Fink §3.2 + §3.4 correction) ───────────────────────────

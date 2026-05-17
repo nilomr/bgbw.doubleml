@@ -198,51 +198,32 @@ def print_spatial_summary(
 
 
 def print_rc_summary(rc: object) -> None:
-    """Print residual confounding calibration summary (Fink §3.4).
+    """Print residual confounding null-diagnostic summary (Fink §2.2).
 
-    Displays the linear calibration coefficients β₀/β₁ and goodness-of-fit
-    alongside the null-bias ATEs for occurrence and count. Values close to
-    β₀≈0, β₁≈1 indicate minimal residual confounding.
+    Values near zero indicate the propensity score model has absorbed the
+    interannual confounding.  bias_ate_abd is the headline: how much trend
+    the model estimates when the true trend is zero.
     """
     import math
 
-    def _style_beta0(b: float) -> str:
+    def _style(b: float) -> str:
         return "green" if abs(b) < 0.005 else ("yellow" if abs(b) < 0.02 else "red")
 
-    def _style_beta1(b: float) -> str:
-        return "green" if abs(b - 1.0) < 0.05 else ("yellow" if abs(b - 1.0) < 0.15 else "red")
-
-    def _style_bias(b: float) -> str:
-        return "green" if abs(b) < 0.005 else ("yellow" if abs(b) < 0.02 else "red")
-
-    beta0 = getattr(rc, "beta0", math.nan)
-    beta1 = getattr(rc, "beta1", math.nan)
-    rsq = getattr(rc, "rsquared", math.nan)
-    rho = getattr(rc, "rank_cor", math.nan)
     bias_occ = getattr(rc, "bias_ate_occ", math.nan)
     bias_count = getattr(rc, "bias_ate_count", math.nan)
+    bias_abd = getattr(rc, "bias_ate_abd", math.nan)
     n_ok = getattr(rc, "n_successful", 0)
-    n_scen = getattr(rc, "n_scenarios", 1)
-    n_sim = getattr(rc, "n_sims_per_scenario", n_ok)
 
-    sb0 = _style_beta0(beta0)
-    sb1 = _style_beta1(beta1)
-    so = _style_bias(bias_occ)
-    sc = _style_bias(bias_count)
+    so = _style(bias_occ)
+    sc = _style(bias_count)
+    sa = _style(bias_abd)
 
     console.print(
-        f"  β₀=[{sb0}]{beta0:+.4f}[/{sb0}]"
-        f"  β₁=[{sb1}]{beta1:.4f}[/{sb1}]"
-        f"  R²={rsq:.3f}  ρ={rho:.3f}"
-        f"  [dim]({n_scen} scenarios × {n_sim} sims)[/dim]"
+        f"  bias_occ=[{so}]{bias_occ:+.4f}[/{so}]"
+        f"  bias_count=[{sc}]{bias_count:+.4f}[/{sc}]"
+        f"  bias_abd=[{sa}]{bias_abd:+.4f}[/{sa}]"
+        f"  [dim]n={n_ok}[/dim]"
     )
-    if not math.isnan(bias_occ):
-        console.print(
-            f"  [dim]null bias:[/dim]"
-            f"  occ=[{so}]{bias_occ:+.4f}[/{so}]"
-            f"  count=[{sc}]{bias_count:+.4f}[/{sc}]"
-            f"  [dim]n_successful={n_ok}[/dim]"
-        )
 
 
 def print_config_panel(cfg: object, run_ensemble: bool) -> None:
