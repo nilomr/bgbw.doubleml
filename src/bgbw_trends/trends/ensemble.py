@@ -46,7 +46,7 @@ class EnsembleTrendResult:
 
     ``bng_ref`` aligns all arrays. Per-year rates are *ratios* (multiply by
     100 for percent-per-year). Point estimates are the across-member median;
-    ``lower``/``upper`` are 10th/90th percentiles.
+    ``lower``/``upper`` are 10th/90th percentiles (80% CI).
     """
 
     species: str
@@ -57,9 +57,18 @@ class EnsembleTrendResult:
     occ_ppy: np.ndarray
     count_ppy: np.ndarray
     abd_ppy: np.ndarray
-    # 80% CIs on abd_ppy (10th/90th percentile across members)
+    # 80% CIs (10th/90th percentile across members) for all trend components
+    occ_ppy_lower: np.ndarray
+    occ_ppy_upper: np.ndarray
+    count_ppy_lower: np.ndarray
+    count_ppy_upper: np.ndarray
     abd_ppy_lower: np.ndarray
     abd_ppy_upper: np.ndarray
+    # 80% CIs for SDM estimates
+    p_occ_lower: np.ndarray
+    p_occ_upper: np.ndarray
+    e_abund_lower: np.ndarray
+    e_abund_upper: np.ndarray
     # Full draws, shape (n_successful, n_cells)
     abd_ppy_draws: np.ndarray
     # Metadata
@@ -245,14 +254,18 @@ def fit_ensemble_trend(
     p_occ_arr = np.vstack([r["p_occurrence"] for r in successful])
     e_abund_arr = np.vstack([r["e_abundance"] for r in successful])
 
+    # Per-member range-wide medians — 10th/90th across these is the CI on
+    # the overall trend estimate and is the interpretable summary number.
+    # The per-cell 10th/90th stored in the result are for spatial CI maps.
+    member_medians = np.nanmedian(abd_arr, axis=1)  # shape (n_members,)
     logger.info(
-        "Ensemble complete: %d/%d members. grid-median abd_ppy=%+.3f%% "
-        "(10th/90th: %+.3f%%, %+.3f%%)",
+        "Ensemble complete: %d/%d members. range-wide median abd_ppy=%+.3f%% "
+        "(member 10th/90th: %+.3f%%, %+.3f%%)",
         n_ok,
         n_ensemble,
-        float(np.nanmedian(np.nanmedian(abd_arr, axis=0))) * 100,
-        float(np.nanmedian(np.nanpercentile(abd_arr, 10, axis=0))) * 100,
-        float(np.nanmedian(np.nanpercentile(abd_arr, 90, axis=0))) * 100,
+        float(np.nanmedian(member_medians)) * 100,
+        float(np.nanpercentile(member_medians, 10)) * 100,
+        float(np.nanpercentile(member_medians, 90)) * 100,
     )
 
     return EnsembleTrendResult(
@@ -263,8 +276,16 @@ def fit_ensemble_trend(
         occ_ppy=np.nanmedian(occ_arr, axis=0),
         count_ppy=np.nanmedian(count_arr, axis=0),
         abd_ppy=np.nanmedian(abd_arr, axis=0),
+        occ_ppy_lower=np.nanpercentile(occ_arr, 10, axis=0),
+        occ_ppy_upper=np.nanpercentile(occ_arr, 90, axis=0),
+        count_ppy_lower=np.nanpercentile(count_arr, 10, axis=0),
+        count_ppy_upper=np.nanpercentile(count_arr, 90, axis=0),
         abd_ppy_lower=np.nanpercentile(abd_arr, 10, axis=0),
         abd_ppy_upper=np.nanpercentile(abd_arr, 90, axis=0),
+        p_occ_lower=np.nanpercentile(p_occ_arr, 10, axis=0),
+        p_occ_upper=np.nanpercentile(p_occ_arr, 90, axis=0),
+        e_abund_lower=np.nanpercentile(e_abund_arr, 10, axis=0),
+        e_abund_upper=np.nanpercentile(e_abund_arr, 90, axis=0),
         abd_ppy_draws=abd_arr,
         n_ensemble=n_ensemble,
         n_successful=n_ok,
