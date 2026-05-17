@@ -53,7 +53,7 @@ def _bootstrap() -> tuple[Path, dict]:
     args = p.parse_args()
     if not args.config.exists():
         p.error(f"Config file not found: {args.config}")
-    with open(args.config) as f:
+    with open(args.config, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     for key, env_var in _PATH_ENV_KEYS.items():
         if key in raw.get("paths", {}):
@@ -170,7 +170,7 @@ def main() -> None:
         with timed_step(
             f"PCA: 128-dim embeddings -> {cfg.n_pca_components} components per stat"
         ):
-            df, embedding_pca = reduce_embeddings_pca(df, cfg.n_pca_components)
+            df, _ = reduce_embeddings_pca(df, cfg.n_pca_components)
 
     n_emb = sum(1 for c in df.columns if c.startswith("emb_"))
     console.print(f"  [dim]embedding features after PCA:[/dim] [cyan]{n_emb}[/cyan]")
@@ -335,7 +335,37 @@ def main() -> None:
             output_path=out.species_shap_figure(sp, "cate"),
         )
         plt.close(fig)
-        console.print(f"  [dim]{sp}:[/dim] SDM → shap_sdm.png  •  CATE → shap_cate.png")
+
+        # ── SHAP data (long format for downstream comparative analysis) ──
+        shap_sdm_path = out.species_shap_data(sp, "sdm")
+        shap_sdm_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.concat(
+            [occ_expl.to_frame("sdm_occ"), count_expl.to_frame("sdm_count")],
+            ignore_index=True,
+        ).to_parquet(shap_sdm_path)
+
+        shap_cate_path = out.species_shap_data(sp, "cate")
+        pd.concat(
+            [cate_occ_expl.to_frame("cate_occ"), cate_count_expl.to_frame("cate_count")],
+            ignore_index=True,
+        ).to_parquet(shap_cate_path)
+
+        # GRF-native heterogeneity importances (unsigned, surrogate-free)
+        grf_frames = []
+        for stage, expl in [("cate_occ", cate_occ_expl), ("cate_count", cate_count_expl)]:
+            if expl.grf_importances is not None:
+                grf_df = expl.grf_importances.copy()
+                grf_df.insert(0, "stage", stage)
+                grf_frames.append(grf_df)
+        if grf_frames:
+            grf_path = out.species_shap_data(sp, "cate_grf_importances")
+            grf_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.concat(grf_frames, ignore_index=True).to_parquet(grf_path)
+
+        console.print(
+            f"  [dim]{sp}:[/dim] SDM → shap_sdm.png + shap_sdm.parquet"
+            f"  •  CATE → shap_cate.png + shap_cate.parquet"
+        )
 
     # ── Residual confounding diagnostic ──────────────────────────────────
     section("Residual confounding diagnostic")
@@ -383,13 +413,21 @@ def main() -> None:
             pd.DataFrame(
                 {
                     "bng_ref": ens.bng_ref,
+                    "p_occurrence": ens.p_occurrence,
+                    "p_occ_lower": ens.p_occ_lower,
+                    "p_occ_upper": ens.p_occ_upper,
+                    "e_abundance": ens.e_abundance,
+                    "e_abund_lower": ens.e_abund_lower,
+                    "e_abund_upper": ens.e_abund_upper,
+                    "occ_ppy": ens.occ_ppy,
+                    "occ_ppy_lower": ens.occ_ppy_lower,
+                    "occ_ppy_upper": ens.occ_ppy_upper,
+                    "count_ppy": ens.count_ppy,
+                    "count_ppy_lower": ens.count_ppy_lower,
+                    "count_ppy_upper": ens.count_ppy_upper,
                     "abd_ppy": ens.abd_ppy,
                     "abd_ppy_lower": ens.abd_ppy_lower,
                     "abd_ppy_upper": ens.abd_ppy_upper,
-                    "occ_ppy": ens.occ_ppy,
-                    "count_ppy": ens.count_ppy,
-                    "p_occurrence": ens.p_occurrence,
-                    "e_abundance": ens.e_abundance,
                 }
             ).to_parquet(ensemble_path)
             plot_prediction_distribution_summary(
