@@ -1,0 +1,29 @@
+paths:
+  harmonized_dir: /home/nilomr/projects/bgbw.data.pipeline-r/output/data/harmonized
+  bng_surveys_dir: /home/nilomr/projects/bgbw.data.pipeline-r/output/data/bng_surveys
+  aef_dir: /mnt/w/projects/BGBW/data/metadata/spatial/aef
+  weather_path: /mnt/w/projects/BGBW/data/metadata/weather/bgbw_weather.parquet
+  january_weather_path: /mnt/w/projects/BGBW/data/metadata/weather/bgbw_january_weather.parquet
+
+run:
+  species: [blackbird]
+  years: [2017, 2019, 2021, 2023]
+  output_dir: output/prototype
+
+model:
+  n_pca_components: 15
+  n_estimators: 300
+  cf_n_estimators: 300
+  rf_min_samples_leaf: 10
+  cf_min_samples_leaf: 50
+
+compute:
+  n_workers: 1
+  inner_n_jobs: -1
+
+ensemble:
+  run: true
+  n_ensemble: 10
+  n_rc_sims: 5
+
+log_file: null

@@ -12,13 +12,16 @@ Optional diagnostics: null-trend simulation for residual confounding and
 a subsample ensemble for grid-level CATE uncertainty.
 
 Usage:
-    uv run python scripts/pipeline/run_prototype.py
+    uv run python scripts/pipeline/run_prototype.py configs/local.yaml
+    uv run python scripts/pipeline/run_prototype.py configs/cluster.yaml
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -26,191 +29,125 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import numpy as np
-import pandas as pd
+import yaml
 
-from bgbw_trends.config import RunConfig
-from bgbw_trends.console import (
-    console,
-    make_progress,
-    make_spinner,
-    print_config_panel,
-    print_rc_summary,
-    print_sdm_table,
-    section,
-    setup_rich_logging,
-    timed_step,
-)
-from bgbw_trends.data import assemble_analysis_data
-from bgbw_trends.features.effort import compute_reference_effort
-from bgbw_trends.features.habitat import reduce_embeddings_pca
-from bgbw_trends.interpret import (
-    explain_cate_surrogate,
-    explain_tree_model,
-    plot_shap_panel,
-)
-from bgbw_trends.pipeline import train_predict_species
-from bgbw_trends.plotting import (
-    plot_prediction_distribution_summary,
-    plot_raw_vs_fitted,
-    plot_sdm_prediction_maps,
-    plot_trend_ppy_panels,
-    plot_yearly_trend,
-)
-from bgbw_trends.trends import (
-    diagnose_residual_confounding,
-    fit_ensemble_trend,
-    split_cell_years,
-)
+# ── Bootstrap ────────────────────────────────────────────────────────────────
+# config.py and data.py resolve path constants at import time, so data-path
+# env vars must be set before any bgbw_trends import happens.
+
+_PATH_ENV_KEYS = {
+    "harmonized_dir": "BGBW_HARMONIZED_DIR",
+    "bng_surveys_dir": "BGBW_BNG_SURVEYS_DIR",
+    "aef_dir": "BGBW_AEF_DIR",
+    "weather_path": "BGBW_WEATHER_PATH",
+    "january_weather_path": "BGBW_JANUARY_WEATHER_PATH",
+}
+
+
+def _bootstrap() -> tuple[Path, dict]:
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("config", type=Path, help="Path to a YAML config file (see configs/).")
+    args = p.parse_args()
+    if not args.config.exists():
+        p.error(f"Config file not found: {args.config}")
+    with open(args.config) as f:
+        raw = yaml.safe_load(f)
+    for key, env_var in _PATH_ENV_KEYS.items():
+        if key in raw.get("paths", {}):
+            os.environ[env_var] = str(raw["paths"][key])
+    return args.config, raw
+
+
+_config_path, _raw_cfg = _bootstrap()
 
 logger = logging.getLogger(__name__)
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse CLI args so -h/--help exits safely without running the pipeline."""
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--species",
-        nargs="+",
-        metavar="SPECIES",
-        default=None,
-        help=(
-            "One or more species to process (e.g. --species blackcap robin). "
-            "Defaults to the list hard-coded in this script."
-        ),
-    )
-    parser.add_argument(
-        "--years",
-        nargs="+",
-        type=int,
-        metavar="YEAR",
-        default=None,
-        help=("Years to include (e.g. --years 2017 2018 2019). Defaults to 2017–2024."),
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        metavar="DIR",
-        help="Root output directory. Defaults to output/prototype.",
-    )
-    parser.add_argument(
-        "--n-workers",
-        type=int,
-        default=1,
-        metavar="N",
-        help=(
-            "Outer process-level workers for the ensemble and residual-"
-            "confounding loops. 1 = sequential. On a cluster node, set to "
-            "the number of pipeline replicas you can run concurrently."
-        ),
-    )
-    parser.add_argument(
-        "--inner-n-jobs",
-        type=int,
-        default=-1,
-        metavar="N",
-        help=(
-            "Threads per individual RF / CausalForest fit. -1 = all cores "
-            "(default). When --n-workers > 1, this is auto-capped to "
-            "cores // n_workers to avoid CPU oversubscription unless an "
-            "explicit positive value is given."
-        ),
-    )
-    parser.add_argument(
-        "--n-ensemble",
-        type=int,
-        default=10,
-        metavar="N",
-        help=(
-            "Ensemble members for trend uncertainty. Default 10 — tractable "
-            "on a single machine, but only an exploratory CI. Fink et al. "
-            "(2023) and Johnston et al. (2025) both use 100; raise to ≥25 "
-            "for a usable percentile CI and to 100 with --n-workers on a "
-            "cluster for publication-grade uncertainty."
-        ),
-    )
-    parser.add_argument(
-        "--n-rc-sims",
-        type=int,
-        default=5,
-        metavar="N",
-        help=(
-            "Null-trend simulations for residual confounding. Default 5 — "
-            "a smoke check. The trendswf vignette uses 100; ≥25 gives a "
-            "stable bias estimate. Each sim fits the full pipeline."
-        ),
-    )
-    parser.add_argument(
-        "--no-ensemble",
-        action="store_true",
-        help="Skip the ensemble step (uncertainty quantification).",
-    )
-    parser.add_argument(
-        "--n-estimators",
-        type=int,
-        default=300,
-        metavar="N",
-        help="Trees in the nuisance random forests. Default 300; raise to 500–1000 on a cluster.",
-    )
-    parser.add_argument(
-        "--cf-n-estimators",
-        type=int,
-        default=300,
-        metavar="N",
-        help="Trees in the causal forests. Default 300; raise to 500–1000 on a cluster.",
-    )
-    parser.add_argument(
-        "--log-file",
-        type=Path,
-        default=None,
-        metavar="PATH",
-        help="Write all log output to this file in addition to the console.",
-    )
-    return parser.parse_args()
-
-
-def _build_grid(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per bng_ref using its most recent (year) habitat snapshot."""
-    return (
-        df.sort_values("year")
-        .drop_duplicates(subset=["bng_ref"], keep="last")
-        .reset_index(drop=True)
-    )
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    args = _parse_args()
+    # bgbw_trends imports live here so they happen after _bootstrap() has set
+    # the data-path env vars that config.py and data.py consume at import time.
+    import numpy as np
+    import pandas as pd
 
-    setup_rich_logging(logging.INFO)
-    if args.log_file:
-        args.log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(args.log_file)
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
-        )
-        logging.getLogger().addHandler(file_handler)
-        sys.stderr.write(f"Logging to {args.log_file}\n")
-
-    # ── Configuration ───────────────────────────────────────────────────
-    run_ensemble = not args.no_ensemble
-
-    cfg = RunConfig(
-        species=args.species or ["blackbird"],
-        years=args.years or list(range(2017, 2025, 2)),
-        output_dir=args.output_dir or Path("output/prototype"),
-        n_pca_components=15,
-        n_estimators=args.n_estimators,
-        cf_n_estimators=args.cf_n_estimators,
-        cf_min_samples_leaf=50,
-        n_workers=args.n_workers,
-        inner_n_jobs=args.inner_n_jobs,
+    from bgbw_trends.config import RunConfig, SPECIES_COLUMNS
+    from bgbw_trends.console import (
+        console,
+        make_progress,
+        make_spinner,
+        print_config_panel,
+        print_rc_summary,
+        print_sdm_table,
+        section,
+        setup_rich_logging,
+        timed_step,
     )
+    from bgbw_trends.data import assemble_analysis_data
+    from bgbw_trends.features.effort import compute_reference_effort
+    from bgbw_trends.features.habitat import reduce_embeddings_pca
+    from bgbw_trends.interpret import explain_cate_surrogate, explain_tree_model, plot_shap_panel
+    from bgbw_trends.pipeline import train_predict_species
+    from bgbw_trends.plotting import (
+        plot_prediction_distribution_summary,
+        plot_raw_vs_fitted,
+        plot_sdm_prediction_maps,
+        plot_trend_ppy_panels,
+        plot_yearly_trend,
+    )
+    from bgbw_trends.trends import diagnose_residual_confounding, fit_ensemble_trend, split_cell_years
+    import matplotlib.pyplot as plt
+
+    def _build_run_config(raw: dict) -> tuple[RunConfig, bool, int, int]:
+        run = raw.get("run", {})
+        model = raw.get("model", {})
+        compute = raw.get("compute", {})
+        ens_cfg = raw.get("ensemble", {})
+        species_raw = run.get("species", ["blackbird"])
+        species = SPECIES_COLUMNS if species_raw == "all" else list(species_raw)
+        cfg = RunConfig(
+            species=species,
+            years=run.get("years", list(range(2017, 2025, 2))),
+            output_dir=Path(run.get("output_dir", "output/prototype")),
+            n_pca_components=model.get("n_pca_components", 15),
+            n_estimators=model.get("n_estimators", 300),
+            cf_n_estimators=model.get("cf_n_estimators", 300),
+            rf_min_samples_leaf=model.get("rf_min_samples_leaf", 10),
+            cf_min_samples_leaf=model.get("cf_min_samples_leaf", 50),
+            n_workers=compute.get("n_workers", 1),
+            inner_n_jobs=compute.get("inner_n_jobs", -1),
+        )
+        return cfg, ens_cfg.get("run", True), ens_cfg.get("n_ensemble", 10), ens_cfg.get("n_rc_sims", 5)
+
+    def _build_grid(df: pd.DataFrame) -> pd.DataFrame:
+        return (
+            df.sort_values("year")
+            .drop_duplicates(subset=["bng_ref"], keep="last")
+            .reset_index(drop=True)
+        )
+
+    raw = _raw_cfg
+
+    # ── Logging ──────────────────────────────────────────────────────────
+    setup_rich_logging(logging.INFO)
+    if log_file := raw.get("log_file"):
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_path)
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"))
+        logging.getLogger().addHandler(fh)
+        sys.stderr.write(f"Logging to {log_path}\n")
+
+    # ── Configuration ────────────────────────────────────────────────────
+    cfg, run_ensemble, n_ensemble, n_rc_sims = _build_run_config(raw)
     out = cfg.output_paths()
+
+    shutil.copy(_config_path, out.root / "config.yaml")
 
     console.print()
     print_config_panel(cfg, run_ensemble)
@@ -247,7 +184,7 @@ def main() -> None:
             f"  mean count (given detection) [cyan]{mean_count:.2f}[/cyan]"
         )
 
-    # ── Reference effort & grid ─────────────────────────────────────────
+    # ── Reference effort & grid ──────────────────────────────────────────
     cfg.reference_effort = compute_reference_effort(df)
     grid = _build_grid(df)
     console.print(
@@ -256,8 +193,7 @@ def main() -> None:
         f"{cfg.reference_effort.n_surveys:.2f}[/cyan]"
     )
 
-    # ── Two-part DML trend + SDM (Fink §3.2) ────────────────────────────
-    # Prototype path — Use fit_ensemble_trend for final trend inference.
+    # ── Two-part DML trend + SDM (Fink §3.2) ─────────────────────────────
     section("Two-part DML trend + SDM")
     console.print()
     predictions = {}
@@ -295,15 +231,11 @@ def main() -> None:
         diag = pred.diagnostics
         sdm_rows.extend(
             [
-                # marginal m̂(X): predicts Y from X, OOB preds become Y.hat
                 (sp, "marginal · occurrence", "Brier", diag.occurrence_brier),
                 (sp, "marginal · occurrence", "ROC AUC", diag.occurrence_auc),
                 (sp, "marginal · occurrence", "PR AUC", diag.occurrence_pr_auc),
                 (sp, "marginal · count | occ", "R²", diag.count_r2),
                 (sp, "marginal · count | occ", "RMSE", diag.count_rmse),
-                # propensity ŝ(X): predicts year from X, OOB preds become T.hat
-                # High R² = strong temporal confounding; DML is doing real work.
-                # R² > 0.85 may indicate a year-proxy feature leaking into X.
                 (sp, "propensity · occurrence", "R²", diag.propensity_occ_r2),
                 (sp, "propensity · count | occ", "R²", diag.propensity_count_r2),
             ]
@@ -355,50 +287,31 @@ def main() -> None:
         species_fig_dir.mkdir(parents=True, exist_ok=True)
 
         plot_sdm_prediction_maps(pred, output_path=out.species_sdm_figure(sp))
-        plot_trend_ppy_panels(
-            pred,
-            output_path=out.species_trend_ppy_panels_figure(sp),
-        )
+        plot_trend_ppy_panels(pred, output_path=out.species_trend_ppy_panels_figure(sp))
         plot_prediction_distribution_summary(
-            pred,
-            output_path=out.species_distribution_summary_figure(sp),
+            pred, output_path=out.species_distribution_summary_figure(sp)
         )
         plot_yearly_trend(pred, output_path=out.species_yearly_trend_figure(sp))
         plot_raw_vs_fitted(pred, output_path=out.species_raw_vs_fitted_figure(sp))
 
-    # ── SHAP interpretability ───────────────────────────────────────────
-    # SDM drivers: exact TreeExplainer on the marginal forests.
-    # τ(W) drivers: surrogate RandomForest on τ̂(W), then TreeExplainer —
-    # econml.grf.CausalForest has no native SHAP hook (unlike CausalForestDML).
-    import matplotlib.pyplot as plt
-
+    # ── SHAP interpretability ────────────────────────────────────────────
     section("SHAP interpretability")
     console.print()
     for sp, models in trained_models.items():
         sp_label = sp.replace("_", " ").title()
         console.print(f"  [dim]{sp}[/dim]  SDM marginal forests…")
-        with timed_step(f"  SDM occ SHAP  (approx, n=500 rows)"):
+        with timed_step("  SDM occ SHAP  (approx, n=500 rows)"):
             occ_expl = explain_tree_model(models.y_bin_forest, models.X_marg_occ)
-        with timed_step(f"  SDM count SHAP  (approx, n=500 rows)"):
+        with timed_step("  SDM count SHAP  (approx, n=500 rows)"):
             count_expl = explain_tree_model(models.y_count_forest, models.X_marg_count)
         console.print(f"  [dim]{sp}[/dim]  CATE surrogate forests…")
-        with timed_step(
-            f"  CATE occ  surrogate fit → SHAP (n={len(models.tau_occ)} rows)"
-        ):
+        with timed_step(f"  CATE occ  surrogate fit → SHAP (n={len(models.tau_occ)} rows)"):
             cate_occ_expl = explain_cate_surrogate(
-                models.bin_cf,
-                models.W_occ,
-                models.W_feature_names,
-                tau_hat=models.tau_occ,
+                models.bin_cf, models.W_occ, models.W_feature_names, tau_hat=models.tau_occ
             )
-        with timed_step(
-            f"  CATE count  surrogate fit → SHAP (n={len(models.tau_count)} rows)"
-        ):
+        with timed_step(f"  CATE count  surrogate fit → SHAP (n={len(models.tau_count)} rows)"):
             cate_count_expl = explain_cate_surrogate(
-                models.count_cf,
-                models.W_count,
-                models.W_feature_names,
-                tau_hat=models.tau_count,
+                models.count_cf, models.W_count, models.W_feature_names, tau_hat=models.tau_count
             )
 
         fig = plot_shap_panel(
@@ -424,15 +337,13 @@ def main() -> None:
         plt.close(fig)
         console.print(f"  [dim]{sp}:[/dim] SDM → shap_sdm.png  •  CATE → shap_cate.png")
 
-    # ── Residual confounding diagnostic ─────────────────────────────────
+    # ── Residual confounding diagnostic ──────────────────────────────────
     section("Residual confounding diagnostic")
     console.print()
-    n_rc = args.n_rc_sims
     for sp in cfg.species:
         with make_spinner() as spin:
             spin.add_task(
-                f"Null-trend simulation [{sp}]  (n_simulations={n_rc})",
-                total=None,
+                f"Null-trend simulation [{sp}]  (n_simulations={n_rc_sims})", total=None
             )
             rc = diagnose_residual_confounding(
                 df,
@@ -440,16 +351,15 @@ def main() -> None:
                 cfg=cfg,
                 grid=grid,
                 reference_effort=cfg.reference_effort,
-                n_simulations=n_rc,
+                n_simulations=n_rc_sims,
             )
-        print_rc_summary(rc.bias_ate_occ, rc.bias_ate_count, rc.n_successful, n_rc)
+        print_rc_summary(rc.bias_ate_occ, rc.bias_ate_count, rc.n_successful, n_rc_sims)
 
-    # ── Ensemble (Johnston §3.4) ────────────────────────────────────────
+    # ── Ensemble (Johnston §3.4) ──────────────────────────────────────────
     section("Ensemble trends")
     if not run_ensemble:
-        console.print("  [dim]skipped (run_ensemble=False)[/dim]")
+        console.print("  [dim]skipped (ensemble.run: false)[/dim]")
     else:
-        n_ensemble = args.n_ensemble
         console.print(
             f"  [dim]{n_ensemble} members  •  50/50 cell-year split  •  "
             f"independent occ/count draws[/dim]"
@@ -458,8 +368,7 @@ def main() -> None:
         for sp in cfg.species:
             with make_spinner() as spin:
                 spin.add_task(
-                    f"Ensemble fitting [{sp}]  ({n_ensemble} members)",
-                    total=None,
+                    f"Ensemble fitting [{sp}]  ({n_ensemble} members)", total=None
                 )
                 ens = fit_ensemble_trend(
                     df=df,

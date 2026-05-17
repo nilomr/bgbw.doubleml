@@ -9,11 +9,13 @@ three outputs in one training pass.
 
 ```bash
 uv sync
-uv run python scripts/pipeline/run_prototype.py
+uv run python scripts/pipeline/run_prototype.py configs/local.yaml
 ```
 
-Edit the `cfg = RunConfig(...)` block in the script to change species, years,
-or output directory. Outputs land under `output/prototype/` by default.
+All run parameters — data paths, species list, model settings, compute budget — live in a
+YAML config file. Edit `configs/local.yaml` for local development or copy it to create a
+new experiment config. A copy of the config is saved alongside outputs for reproducibility.
+See the [User Guide](docs/USER_GUIDE.md) for details.
 
 ## Documentation
 

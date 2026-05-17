@@ -6,96 +6,101 @@ How to set up, configure, and run the current pipeline implementation.
 
 ## 1. Data requirements
 
-The pipeline reads from four external sources. Each path defaults to the
-originating-machine location hard-coded in
-[`config.py`](../src/bgbw_trends/config.py) and can be overridden at run
-time by setting the corresponding environment variable — no source edits
-required.
+The pipeline currently reads from five external sources:
 
-| Source | Env var | Expected files |
-|---|---|---|
-| Harmonized surveys | `BGBW_HARMONIZED_DIR` | `bgbw_{year}.parquet` — individual-level BGBW submissions |
-| BNG-aggregated surveys | `BGBW_BNG_SURVEYS_DIR` | `bng1km_surveys_{year}.parquet` — one row per (cell, year) |
-| Geospatial embeddings | `BGBW_AEF_DIR` | `aef_bng1km_{year}_uk.parquet` — one row per 1 km BNG cell |
-| Survey-weekend weather | `BGBW_WEATHER_PATH` | HadUK-Grid parquet |
-| January weather | `BGBW_JANUARY_WEATHER_PATH` | HadUK-Grid parquet |
+| Source | Expected files |
+|---|---|
+| Harmonized surveys | `bgbw_{year}.parquet` — individual-level BGBW submissions |
+| BNG-aggregated surveys | `bng1km_surveys_{year}.parquet` — one row per (cell, year) |
+| Geospatial embeddings | `aef_bng1km_{year}_uk.parquet` — one row per 1 km BNG cell |
+| Survey-weekend weather | HadUK-Grid parquet |
+| January weather | HadUK-Grid parquet |
+
+See the project kanban for the current status of these variables and others in progress or under consideration.
 
 Harmonized and BNG-aggregated files are produced by the BGBW data pipeline
-repo (`bgbw.data.pipeline-r`). On a new machine, export the five variables
-before running (or place them in a shell rc / wrapper script):
-
-```bash
-export BGBW_HARMONIZED_DIR=/data/bgbw/harmonized
-export BGBW_BNG_SURVEYS_DIR=/data/bgbw/bng_surveys
-export BGBW_AEF_DIR=/data/bgbw/aef
-export BGBW_WEATHER_PATH=/data/bgbw/weather/bgbw_weather.parquet
-export BGBW_JANUARY_WEATHER_PATH=/data/bgbw/weather/bgbw_january_weather.parquet
-```
+repo (`bgbw.data.pipeline`). Set the paths in your config file (see §2).
 
 ---
 
 ## 2. Configuration
 
-All run parameters live in `RunConfig`
-([config.py:261](../src/bgbw_trends/config.py#L261)):
+Every run is driven by a YAML config file. Two are provided in [`configs/`](../configs/):
 
-```python
-from bgbw_trends.config import RunConfig
-from pathlib import Path
+| File | Purpose |
+|---|---|
+| [`configs/local.yaml`](../configs/local.yaml) | Local development — single species, quick settings |
+| [`configs/cluster.yaml`](../configs/cluster.yaml) | Cluster run — all species, full model, more workers |
 
-cfg = RunConfig(
-    species=["blackcap", "robin"],
-    years=list(range(2017, 2025)),
-    output_dir=Path("output/myrun"),
-    n_pca_components=30,     # PCA dimension for embeddings; 0 = no PCA
-    n_estimators=700,        # trees in marginal and propensity forests
-    cf_n_estimators=700,     # trees in causal forests
-    cf_min_samples_leaf=50,  # causal forest leaf size
-)
+Copy either file to create a new experiment config. The sections are:
+
+```yaml
+paths:                        # data locations — edit per machine
+  harmonized_dir: /data/bgbw/harmonized
+  bng_surveys_dir: /data/bgbw/bng_surveys
+  aef_dir: /data/bgbw/aef
+  weather_path: /data/bgbw/weather/bgbw_weather.parquet
+  january_weather_path: /data/bgbw/weather/bgbw_january_weather.parquet
+
+run:
+  species: all                # "all" = all 73 species, or a list e.g. [blackbird, robin]
+  years: [2017, 2019, 2021, 2023]
+  output_dir: output/myrun
+
+model:
+  n_pca_components: 15        # PCA dim for embeddings; 0 = no PCA
+  n_estimators: 500           # trees in nuisance random forests
+  cf_n_estimators: 500        # trees in causal forests
+  rf_min_samples_leaf: 10
+  cf_min_samples_leaf: 50
+
+compute:
+  n_workers: 20               # parallel ensemble/RC workers
+  inner_n_jobs: 5             # threads per RF/CF fit (n_workers × inner_n_jobs ≤ total CPUs)
+
+ensemble:
+  run: true
+  n_ensemble: 100             # ≥25 for usable CIs; 100 for publication quality
+  n_rc_sims: 100              # ≥25 for stable bias estimate
+
+log_file: logs/myrun.log      # null to disable file logging
 ```
 
-Key defaults to be aware of:
+A copy of the resolved config is written to `output/<run>/config.yaml` at the
+start of every run, so results are always traceable to the exact parameters used.
 
-- `embedding_years` defaults to `None`, which causes the pipeline to average
-  AEF embeddings across all available years in `AEF_DIR`. Set it explicitly
-  to restrict which snapshots are used.
-- `reference_effort` is overridden at runtime by `compute_reference_effort`;
-  you do not need to set it manually.
-- `SPECIES_COLUMNS` in `config.py` lists the 74 species the pipeline is
-  designed to handle.
+Key notes:
+
+- `reference_effort` is computed automatically; do not set it manually.
+- `SPECIES_COLUMNS` in [`config.py`](../src/bgbw_trends/config.py) lists all 73
+  supported species (used when `species: all`).
 
 ---
 
 ## 3. Running the pipeline
 
-### Prototype run
-
 ```bash
-# Single species, defaults
-uv run python scripts/pipeline/run_prototype.py
+# Local development run
+uv run python scripts/pipeline/run_prototype.py configs/local.yaml
 
-# Multiple species, explicit year range and output directory
-uv run python scripts/pipeline/run_prototype.py \
-    --species blackcap robin blue_tit \
-    --years 2017 2018 2019 2020 2021 2022 2023 2024 \
-    --output-dir output/myrun
+# Full cluster run
+uv run python scripts/pipeline/run_prototype.py configs/cluster.yaml
+
+# Custom experiment — copy and edit a config, then run it
+cp configs/local.yaml configs/sensitivity_1000trees.yaml
+# edit configs/sensitivity_1000trees.yaml ...
+uv run python scripts/pipeline/run_prototype.py configs/sensitivity_1000trees.yaml
 ```
 
-`--species` accepts one or more names from `SPECIES_COLUMNS` in `config.py`.
-`--years` and `--output-dir` are optional; both default to the values
-hard-coded near the top of the script.
-
-Fits the two-part DML model for each species in `cfg.species`, saves
-predictions and figures for each species, runs the residual-confounding
-diagnostic for the first species in `cfg.species`, and optionally runs an
-ensemble for uncertainty quantification for that same first species
-(controlled by `run_ensemble = True/False` near the top of the script).
+Fits the two-part DML model for each species, saves predictions and figures,
+runs the residual-confounding diagnostic, and optionally fits an ensemble for
+uncertainty quantification — all for every species in the config.
 
 **Note on hurdle independence.** The prototype splits training data into two
 non-overlapping 50/50 stratified halves via `split_cell_years` — one for the
 occurrence stage, one for the count stage — so the chain-rule combination
-(`abd_ppy = τ_occ/P(occ) + τ_count`) is based on genuinely independent
-estimates. For published uncertainty quantification use `fit_ensemble_trend`
+(`abd_ppy = τ_occ/P(occ) + τ_count`) is based on independent
+estimates. For uncertainty quantification use `fit_ensemble_trend`
 from [`trends/ensemble.py`](../src/bgbw_trends/trends/ensemble.py), which
 repeats this split across multiple ensemble members.
 
@@ -150,18 +155,20 @@ The prediction parquet has one row per 1 km BNG cell:
 | `occ_sigma` | causal forest SD for occurrence CATE (if computed) |
 | `count_sigma` | causal forest SD for count CATE (if computed) |
 
-If `run_ensemble=True`, the ensemble parquet for the first configured species
-adds `abd_ppy_lower` and `abd_ppy_upper` (10th/90th percentile across
-ensemble members).
+If `ensemble.run: true`, an ensemble parquet is produced for every configured
+species, adding `abd_ppy_lower` and `abd_ppy_upper` (10th/90th percentile
+across ensemble members).
 
 ---
 
 ## 5. Adding a new species
 
-All 74 species in `SPECIES_COLUMNS` are ready to use:
+All 73 species in `SPECIES_COLUMNS` are ready to use. Set `species: all` in your
+config to run them all, or list specific names:
 
-```python
-cfg = RunConfig(species=["song_thrush"], years=list(range(2015, 2020)))
+```yaml
+run:
+  species: [song_thrush, mistle_thrush]
 ```
 
 Two things to watch for:
@@ -180,12 +187,14 @@ Two things to watch for:
 
 ## 6. Extending the time series
 
-The prototype defaults to every other year (2017, 2019, 2021, 2023) for speed; pass `--years 2017 2018 … 2024` for the full run. To extend the time series:
+The default config uses every other year (2017, 2019, 2021, 2023) for speed;
+set `years: [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]` in your config
+for the full annual run. To extend the time series:
 
 1. Produce harmonized and BNG-aggregated parquets for the new year(s) using
-   the data pipeline repo and place them in `HARMONIZED_DIR` and
-   `BNG_SURVEYS_DIR`.
-2. Update `RunConfig.years`.
+   the data pipeline repo and place them in the directories listed under
+   `paths` in your config.
+2. Add the new year(s) to `run.years` in your config.
 3. For study periods beyond roughly five years, consider switching to per-year
    embeddings — the current multi-year mean is adequate for short spans but
    land-cover change becomes a real confounder over a decade. See
