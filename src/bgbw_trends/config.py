@@ -218,6 +218,7 @@ class OutputPaths:
     diagnostics_dir: Path
     ensemble_dir: Path
     maps_dir: Path
+    shap_dir: Path
 
     def species_prediction_file(self, species: str) -> Path:
         return self.predictions_dir / species / "prediction.parquet"
@@ -250,6 +251,10 @@ class OutputPaths:
         """SHAP figure path. ``which`` is e.g. ``sdm_occ``, ``sdm_count``,
         ``cate_occ``, ``cate_count``; also ``_bar`` / ``_beeswarm`` suffixes."""
         return self.species_figures_dir(species) / f"shap_{which}.png"
+
+    def species_shap_data(self, species: str, which: str) -> Path:
+        """Long-format SHAP parquet. ``which`` is ``sdm`` or ``cate``."""
+        return self.shap_dir / species / f"{which}.parquet"
 
 
 # ── Run configuration ───────────────────────────────────────────────────────
@@ -312,6 +317,7 @@ class RunConfig:
             diagnostics_dir=self.output_dir / "diagnostics",
             ensemble_dir=self.output_dir / "ensemble" / "species",
             maps_dir=self.output_dir / "figures" / "maps",
+            shap_dir=self.output_dir / "shap" / "species",
         )
         dirs = [
             paths.root,
@@ -321,6 +327,7 @@ class RunConfig:
             paths.ensemble_dir,
             paths.maps_dir,
             paths.figures_dir / "species",
+            paths.shap_dir,
         ]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
