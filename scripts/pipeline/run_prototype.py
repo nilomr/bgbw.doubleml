@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -62,7 +63,6 @@ from bgbw_trends.trends import (
     split_cell_years,
 )
 
-setup_rich_logging(logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -149,6 +149,27 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the ensemble step (uncertainty quantification).",
     )
+    parser.add_argument(
+        "--n-estimators",
+        type=int,
+        default=300,
+        metavar="N",
+        help="Trees in the nuisance random forests. Default 300; raise to 500–1000 on a cluster.",
+    )
+    parser.add_argument(
+        "--cf-n-estimators",
+        type=int,
+        default=300,
+        metavar="N",
+        help="Trees in the causal forests. Default 300; raise to 500–1000 on a cluster.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Write all log output to this file in addition to the console.",
+    )
     return parser.parse_args()
 
 
@@ -164,6 +185,17 @@ def _build_grid(df: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     args = _parse_args()
 
+    setup_rich_logging(logging.INFO)
+    if args.log_file:
+        args.log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(args.log_file)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
+        sys.stderr.write(f"Logging to {args.log_file}\n")
+
     # ── Configuration ───────────────────────────────────────────────────
     run_ensemble = not args.no_ensemble
 
@@ -172,8 +204,8 @@ def main() -> None:
         years=args.years or list(range(2017, 2025, 2)),
         output_dir=args.output_dir or Path("output/prototype"),
         n_pca_components=15,
-        n_estimators=300,
-        cf_n_estimators=300,
+        n_estimators=args.n_estimators,
+        cf_n_estimators=args.cf_n_estimators,
         cf_min_samples_leaf=50,
         n_workers=args.n_workers,
         inner_n_jobs=args.inner_n_jobs,
@@ -396,20 +428,21 @@ def main() -> None:
     section("Residual confounding diagnostic")
     console.print()
     n_rc = args.n_rc_sims
-    with make_spinner() as spin:
-        spin.add_task(
-            f"Null-trend simulation [{cfg.species[0]}]  (n_simulations={n_rc})",
-            total=None,
-        )
-        rc = diagnose_residual_confounding(
-            df,
-            species=cfg.species[0],
-            cfg=cfg,
-            grid=grid,
-            reference_effort=cfg.reference_effort,
-            n_simulations=n_rc,
-        )
-    print_rc_summary(rc.bias_ate_occ, rc.bias_ate_count, rc.n_successful, n_rc)
+    for sp in cfg.species:
+        with make_spinner() as spin:
+            spin.add_task(
+                f"Null-trend simulation [{sp}]  (n_simulations={n_rc})",
+                total=None,
+            )
+            rc = diagnose_residual_confounding(
+                df,
+                species=sp,
+                cfg=cfg,
+                grid=grid,
+                reference_effort=cfg.reference_effort,
+                n_simulations=n_rc,
+            )
+        print_rc_summary(rc.bias_ate_occ, rc.bias_ate_count, rc.n_successful, n_rc)
 
     # ── Ensemble (Johnston §3.4) ────────────────────────────────────────
     section("Ensemble trends")
@@ -422,41 +455,42 @@ def main() -> None:
             f"independent occ/count draws[/dim]"
         )
         console.print()
-        with make_spinner() as spin:
-            spin.add_task(
-                f"Ensemble fitting [{cfg.species[0]}]  ({n_ensemble} members)",
-                total=None,
+        for sp in cfg.species:
+            with make_spinner() as spin:
+                spin.add_task(
+                    f"Ensemble fitting [{sp}]  ({n_ensemble} members)",
+                    total=None,
+                )
+                ens = fit_ensemble_trend(
+                    df=df,
+                    cfg=cfg,
+                    species=sp,
+                    grid=grid,
+                    reference_effort=cfg.reference_effort,
+                    n_ensemble=n_ensemble,
+                )
+            ensemble_path = out.species_ensemble_file(sp)
+            ensemble_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                {
+                    "bng_ref": ens.bng_ref,
+                    "abd_ppy": ens.abd_ppy,
+                    "abd_ppy_lower": ens.abd_ppy_lower,
+                    "abd_ppy_upper": ens.abd_ppy_upper,
+                    "occ_ppy": ens.occ_ppy,
+                    "count_ppy": ens.count_ppy,
+                    "p_occurrence": ens.p_occurrence,
+                    "e_abundance": ens.e_abundance,
+                }
+            ).to_parquet(ensemble_path)
+            plot_prediction_distribution_summary(
+                predictions[sp],
+                ensemble=ens,
+                output_path=out.species_distribution_summary_figure(sp),
             )
-            ens = fit_ensemble_trend(
-                df=df,
-                cfg=cfg,
-                species=cfg.species[0],
-                grid=grid,
-                reference_effort=cfg.reference_effort,
-                n_ensemble=n_ensemble,
+            console.print(
+                f"  [dim]{sp}: {ens.n_successful}/{ens.n_ensemble} members successful[/dim]"
             )
-        ensemble_path = out.species_ensemble_file(cfg.species[0])
-        ensemble_path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(
-            {
-                "bng_ref": ens.bng_ref,
-                "abd_ppy": ens.abd_ppy,
-                "abd_ppy_lower": ens.abd_ppy_lower,
-                "abd_ppy_upper": ens.abd_ppy_upper,
-                "occ_ppy": ens.occ_ppy,
-                "count_ppy": ens.count_ppy,
-                "p_occurrence": ens.p_occurrence,
-                "e_abundance": ens.e_abundance,
-            }
-        ).to_parquet(ensemble_path)
-        plot_prediction_distribution_summary(
-            predictions[cfg.species[0]],
-            ensemble=ens,
-            output_path=out.species_distribution_summary_figure(cfg.species[0]),
-        )
-        console.print(
-            f"  [dim]{ens.n_successful}/{ens.n_ensemble} members successful[/dim]"
-        )
 
     console.print()
     console.print(f"[dim]All results written to[/dim] [cyan]{out.root}[/cyan]")
