@@ -973,30 +973,40 @@ def plot_prediction_distribution_summary(
         fontfamily=style.FONT_FAMILY,
     )
 
-    compare_ax = ax_summary.inset_axes([0.08, 0.08, 0.84, 0.28])
+    compare_ax = ax_summary.inset_axes([0.08, 0.05, 0.84, 0.40])
     _style_series_axis(compare_ax)
     compare_ax.grid(axis="x", color=style.GRIDLINE, linewidth=0.8, alpha=0.8)
     compare_ax.grid(axis="y", visible=False)
     compare_ax.set_ylabel("")
 
+    _CLR_OCC = "#2C6E91"
+    _CLR_CNT = "#C5672F"
+    _CLR_ABD = "#5A7F62"
+
+    # Each row: (label, center, lower, upper, marker, color)
     rows: list[tuple[str, float, float | None, float | None, str, str]] = [
-        ("Pipeline abundance", float(np.nanmedian(abd_ppy)), None, None, "o", "#5A7F62")
+        ("Pipeline  occ",   float(np.nanmedian(occ_ppy)),   None, None, "o", _CLR_OCC),
+        ("Pipeline  count", float(np.nanmedian(count_ppy)), None, None, "o", _CLR_CNT),
+        ("Pipeline  abd",   float(np.nanmedian(abd_ppy)),   None, None, "o", _CLR_ABD),
     ]
     if ensemble is not None:
-        ens_abd = _finite_values(getattr(ensemble, "abd_ppy"), scale=100.0)
-        ens_lo = _finite_values(getattr(ensemble, "abd_ppy_lower"), scale=100.0)
-        ens_hi = _finite_values(getattr(ensemble, "abd_ppy_upper"), scale=100.0)
-        if ens_abd.size and ens_lo.size and ens_hi.size:
-            rows.append(
-                (
-                    "Ensemble abundance",
-                    float(np.nanmedian(ens_abd)),
-                    float(np.nanmedian(ens_lo)),
-                    float(np.nanmedian(ens_hi)),
-                    "s",
-                    "#6E5E9C",
-                )
-            )
+        def _ens(attr: str) -> float | None:
+            arr = _finite_values(getattr(ensemble, attr, np.array([])), scale=100.0)
+            return float(np.nanmedian(arr)) if arr.size else None
+
+        ens_occ   = _ens("occ_ppy")
+        ens_occ_lo, ens_occ_hi     = _ens("occ_ppy_lower"),   _ens("occ_ppy_upper")
+        ens_cnt   = _ens("count_ppy")
+        ens_cnt_lo, ens_cnt_hi     = _ens("count_ppy_lower"), _ens("count_ppy_upper")
+        ens_abd   = _ens("abd_ppy")
+        ens_abd_lo, ens_abd_hi     = _ens("abd_ppy_lower"),   _ens("abd_ppy_upper")
+
+        if ens_occ is not None:
+            rows.append(("Ensemble  occ",   ens_occ,   ens_occ_lo, ens_occ_hi, "s", _CLR_OCC))
+        if ens_cnt is not None:
+            rows.append(("Ensemble  count", ens_cnt,   ens_cnt_lo, ens_cnt_hi, "s", _CLR_CNT))
+        if ens_abd is not None:
+            rows.append(("Ensemble  abd",   ens_abd,   ens_abd_lo, ens_abd_hi, "s", _CLR_ABD))
 
     y = np.arange(len(rows))[::-1]
     centers = [row[1] for row in rows]
@@ -1009,16 +1019,12 @@ def plot_prediction_distribution_summary(
     compare_ax.axvline(0.0, color=style.GRIDLINE, linewidth=1.0)
 
     for yi, (label, center, lower, upper, marker, color) in zip(y, rows, strict=False):
-        if (
-            lower is not None
-            and upper is not None
-            and (lower != center or upper != center)
-        ):
-            compare_ax.hlines(yi, lower, upper, color=color, linewidth=2.0)
+        if lower is not None and upper is not None and (lower != center or upper != center):
+            compare_ax.hlines(yi, lower, upper, color=color, linewidth=2.0, alpha=0.6)
         compare_ax.scatter([center], [yi], s=52, marker=marker, color=color, zorder=3)
     compare_ax.set_yticks(y, [row[0] for row in rows])
-    compare_ax.tick_params(axis="y", labelsize=8.5)
-    compare_ax.set_xlabel("Abundance trend (%/yr)", **style.FONT_LABEL)
+    compare_ax.tick_params(axis="y", labelsize=8.0)
+    compare_ax.set_xlabel("Trend (%/yr)", **style.FONT_LABEL)
 
     species_label = prediction.species.replace("_", " ").title()
     subtitle = (
