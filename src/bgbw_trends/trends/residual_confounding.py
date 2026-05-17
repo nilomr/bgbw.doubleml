@@ -1,28 +1,107 @@
 """Residual-confounding null diagnostic (Fink 2023 §2.2).
 
-Fully data-driven simulation diagnostic: generate zero-trend data via
-stratified bootstrap + conditional-mean forest, refit the full pipeline,
-and measure the bias in the estimated trend.
+Background
+----------
+DML removes confounding between year (the treatment) and the species
+response by partialling out a propensity score model — a forest that
+predicts year from the observer-process features (X_effort) and habitat
+features (X_hab).  If the propensity score model is well-specified, the
+residuals year - s_hat(X) carry no signal from the confounders and the
+causal-forest stage recovers an unbiased trend.
 
-Algorithm (§2.2):
-  1. Resample surveys with replacement, stratified by year, to maintain
-     the interannual confounding in the original features.
-  2. Regenerate the species response from the conditional mean model
-     (zero-trend DGP) with parametric-bootstrap noise.
-  3. Refit the full DML pipeline on the null data.
-  4. Record the estimated occ_ppy, count_ppy, abd_ppy.
+Residual confounding occurs when the propensity model *misses* some
+channel through which year predicts the response — e.g. a systematic
+change in observer demographics not captured by X_effort, or a land-use
+trend that correlates with survey effort.  In that case the estimated
+trend is biased: the model would detect a "trend" even in data where no
+true trend exists.
 
-Interpretation:
-  Bias far from zero indicates the propensity score model has not fully
-  absorbed the interannual confounding.  The null ATE provides a simple
-  directional-bias correction (Fink vignette):
+Algorithm (§2.2)
+----------------
+The null diagnostic quantifies this bias via a fully data-driven
+simulation:
 
-      corrected_range_wide_trend ≈ raw_trend − bias_ate_abd
+  1. Resample surveys with replacement, stratified by year, to preserve
+     the interannual confounding structure in the original features
+     (same year-distribution, same feature-year correlations).
+  2. Replace the species response with draws from a zero-trend DGP:
+     fit a conditional-mean forest on (X_hab, X_effort) — **no year** —
+     obtain OOB predictions (the conditional mean given covariates), add
+     parametric-bootstrap noise matching the residual SD.  For the hurdle
+     model this is done separately for the binary occurrence stage
+     (Bernoulli draw) and the log-count stage (Gaussian noise on detected
+     rows).
+  3. Refit the full DML pipeline on this null data.
+  4. Record the estimated range-wide trend as the spatial median of
+     abd_ppy across grid cells: median(τ_occ(W) / P(occ) + τ_count(W)).
 
-This is intentionally the §2.2 null-only diagnostic, NOT the extended
-multi-scenario calibration regression from §3.4/§3.5.  See docs/refrence/
-fink_2023.txt §3.4 for why that extension requires a population-dynamics
-DGP with spatially varying trends (50+ pipeline fits per species).
+By construction the true trend in the null data is zero; any non-zero
+estimated trend is pure bias from residual confounding.  Averaging the
+null estimates over several independent simulations gives a stable bias
+estimate.
+
+This exactly mirrors ``generate_null_trend_model_data`` in
+``trendswf/doc/motivating-example.R`` and the vignette
+``trendswf/vignettes/motivating-example.Rmd`` (``n_mc <- 100`` null sims).
+The key check — that year is absent from the conditional-mean forest —
+is guaranteed here because ``_assemble_X(df, None)`` only includes
+HABITAT_FEATURES + EFFORT_FEATURES (see ``config.py``), not year.
+
+Bias correction (Fink §2.2 / vignette)
+---------------------------------------
+Both the raw ensemble trend and the null-sim trend use the same summary
+statistic: the spatial median of abd_ppy over grid cells.  The correction
+subtracts like from like:
+
+    corrected_range_wide_trend ≈ raw_trend − bias_ate_abd
+
+where ``raw_trend = np.nanmedian(ensemble.abd_ppy)`` (median across cells,
+then median across ensemble members) and ``bias_ate_abd`` is the mean of
+``np.nanmedian(abd_ppy)`` across null simulations.
+
+SE propagation: the vignette simulation study shows that combining the
+real SE and the null SD in quadrature is a conservative but sensible
+approach (both are independent Gaussian noise):
+
+    corrected_SE ≈ sqrt(real_SE² + null_SD²)
+
+where ``null_SD = std(sim_ate_abd)`` from the ``ResidualConfoundingResult``.
+
+Output files (written by the pipeline script)
+---------------------------------------------
+``adjustment.json``
+    Scalar bias estimates (bias_ate_occ, bias_ate_count, bias_ate_abd)
+    and metadata (n_successful, n_simulations).  Load this file and
+    apply the correction post-hoc:
+
+        import json, numpy as np
+        adj = json.load(open("rc/blackbird/adjustment.json"))
+        corrected = raw_abd_ppy_median - adj["bias_ate_abd"]
+
+``simulations.parquet``
+    Long-format per-simulation × per-cell table (sim_idx, bng_ref,
+    occ_ppy, count_ppy, abd_ppy).  Used for spatial bias diagnostics:
+    are some regions systematically over- or under-estimated in the
+    null?  Per-cell correction is not validated by Fink and should be
+    treated as exploratory.
+
+Limitations
+-----------
+* The null bias is a scalar; the correction assumes confounding affects
+  all grid cells equally.  If confounding is spatially heterogeneous the
+  range-wide correction is correct in expectation but per-cell
+  corrections are unreliable.
+* 5 null simulations (the script default) give a coarse bias estimate.
+  Use ≥25 for a usable bias estimate; 100 (Fink's reference) for
+  publication-grade results.
+* This is intentionally the §2.2 null-only diagnostic, NOT the extended
+  multi-scenario calibration regression from §3.4/§3.5.  The §3.4
+  extension fits a per-cell regression of (estimated trend) ~ (true
+  trend) across 50+ training scenarios generated by a population-dynamics
+  DGP with spatially varying true trends (core-edge gradient).  It
+  requires substantially more compute and a bespoke simulation study;
+  see docs/refrence/fink_2023.txt §3.4 and science_sm.txt §3.5 for
+  details.
 """
 
 from __future__ import annotations

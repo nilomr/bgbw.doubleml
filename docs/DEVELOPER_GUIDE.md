@@ -347,6 +347,77 @@ CLI flags on `scripts/pipeline/run_prototype.py`:
 
 ---
 
+## 7b. Residual confounding: what it is and how to correct for it
+
+### What it is
+
+DML removes confounding by partialling out a propensity score model —
+a forest that predicts year from the effort and habitat features (X).
+If year-to-year changes in observer behaviour or landscape are not fully
+captured by X, the propensity model will miss them.  The causal forest
+then attributes part of those unmodelled year-level changes to the
+species trend, biasing the estimate.
+
+The null diagnostic (Fink 2023 §2.2) quantifies this bias: it generates
+synthetic data where the **true trend is exactly zero** (by replacing the
+observed species counts with draws from a conditional-mean forest that
+does not see year), refits the full DML pipeline, and measures how far
+the estimated trend is from zero.  A non-zero null estimate is pure
+residual-confounding bias.
+
+### The algorithm
+
+1. Stratified bootstrap by year — preserves the interannual correlation
+   structure between year and the confounders.
+2. Replace the species column with a zero-trend DGP: fit a conditional-mean
+   forest on (X_hab, X_effort) **with year excluded**, get OOF predictions,
+   add parametric-bootstrap noise matching the residual SD.  For the hurdle
+   model: Bernoulli draw for occurrence, log-normal noise for log-counts on
+   detected rows.
+3. Refit the full DML pipeline on the null data.
+4. Record `np.nanmedian(abd_ppy)` over grid cells — the range-wide null
+   estimate.
+
+Repeat steps 1–4 N times (≥25 for a stable estimate; 100 for publication
+results).
+
+### Applying the bias correction (post-hoc)
+
+The correction subtracts the null bias from the raw ensemble trend, using
+the **same summary statistic** (spatial median of `abd_ppy`):
+
+```python
+import json
+import numpy as np
+
+adj = json.load(open("output/rc/species/blackbird/adjustment.json"))
+bias = adj["bias_ate_abd"]          # mean(nanmedian(abd_ppy)) over null sims
+bias_sd = ...                        # std(sim_ate_abd) from ResidualConfoundingResult
+
+# From the ensemble parquet
+raw_trend = np.nanmedian(ensemble_abd_ppy)          # median over cells
+
+corrected_trend = raw_trend - bias
+
+# Conservative SE (independent noise, from Fink vignette):
+# corrected_SE ≈ sqrt(real_SE² + null_SD²)
+```
+
+`bias_ate_abd` is positive when the null pipeline overestimates a
+positive trend and negative when it overestimates a negative trend. If the bias is large relative to the raw trend, the corrected trend may even flip sign. 
+
+Take care with this port, it has not been thoroughly tested and reviewed. This is work done quickly.
+
+### Output files
+
+| File | Contents |
+|------|----------|
+| `rc/<species>/adjustment.json` | `bias_ate_occ`, `bias_ate_count`, `bias_ate_abd`, `n_successful`, `n_simulations` |
+| `rc/<species>/simulations.parquet` | Per-sim × per-cell: `sim_idx`, `bng_ref`, `occ_ppy`, `count_ppy`, `abd_ppy` — for spatial bias diagnostics |
+
+
+---
+
 ## 8. Reference materials
 
 1. Fink, D., Johnston, A., et al. (2023). *A Double machine learning trend
