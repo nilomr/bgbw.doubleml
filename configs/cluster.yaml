@@ -2,21 +2,21 @@ paths:
   # Update these to match the actual paths on the cluster
   harmonized_dir: /data/bgbw/harmonized
   bng_surveys_dir: /data/bgbw/bng_surveys
-  aef_dir: /data/bgbw/aef
+  aef_dir: /data/BS/userdata/nilo/projects/BGBW/data/metadata/spatial/aef/
   weather_path: /data/bgbw/weather/bgbw_weather.parquet
   january_weather_path: /data/bgbw/weather/bgbw_january_weather.parquet
 
 run:
-  species: all  # expands to all 73 species in SPECIES_COLUMNS
-  years: [2017, 2019, 2021, 2023]
+  species: [wood_pigeon] # , house_sparrow,blackcap, red_kite, ring_necked_parakeet, collared_dove, starling, chaffinch, greenfinch, goldfinch, blue_tit, great_tit]
+  years: [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
   output_dir: output/cluster
 
 model:
-  n_pca_components: 15
-  n_estimators: 1000
-  cf_n_estimators: 1000
+  n_pca_components: 30
+  n_estimators: 500
+  cf_n_estimators: 500
   rf_min_samples_leaf: 10
-  cf_min_samples_leaf: 50
+  cf_min_samples_leaf: 10
 
 compute:
   n_workers: 20      # parallel ensemble/RC workers
@@ -24,7 +24,7 @@ compute:
 
 ensemble:
   run: true
-  n_ensemble: 100
-  n_rc_sims: 100
+  n_ensemble: 10
+  n_rc_sims: 10
 
 log_file: logs/cluster.log
