@@ -40,6 +40,7 @@ _PATH_ENV_KEYS = {
     "aef_dir": "BGBW_AEF_DIR",
     "weather_path": "BGBW_WEATHER_PATH",
     "january_weather_path": "BGBW_JANUARY_WEATHER_PATH",
+    "output_dir": "BGBW_OUTPUT_DIR",
 }
 
 
@@ -119,10 +120,17 @@ def main() -> None:
         ens_cfg = raw.get("ensemble", {})
         species_raw = run.get("species", ["blackbird"])
         species = SPECIES_COLUMNS if species_raw == "all" else list(species_raw)
+        # paths.output_dir (in YAML) → BGBW_OUTPUT_DIR (env, set by bootstrap)
+        # → run.output_dir (legacy key, kept for back-compat) → in-repo default.
+        output_dir = (
+            os.environ.get("BGBW_OUTPUT_DIR")
+            or run.get("output_dir")
+            or "output"
+        )
         cfg = RunConfig(
             species=species,
             years=run.get("years", list(range(2017, 2025, 2))),
-            output_dir=Path(run.get("output_dir", "output/prototype")),
+            output_dir=Path(output_dir),
             n_pca_components=model.get("n_pca_components", 15),
             n_estimators=model.get("n_estimators", 300),
             cf_n_estimators=model.get("cf_n_estimators", 300),
@@ -184,7 +192,6 @@ def main() -> None:
     )
 
     # ── Embedding PCA ────────────────────────────────────────────────────
-    embedding_pca = None
     if cfg.n_pca_components:
         with timed_step(
             f"PCA: 128-dim embeddings -> {cfg.n_pca_components} components per stat"

@@ -71,11 +71,15 @@ def _load_config_defaults(config_path: str | None) -> dict:
         return {}
     with open(config_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+    paths = raw.get("paths", {})
+    run = raw.get("run", {})
     out: dict = {}
-    if "run" in raw and "output_dir" in raw["run"]:
-        out["results"] = raw["run"]["output_dir"]
-    if "paths" in raw and "uk_shp" in raw["paths"]:
-        out["uk_shp"] = raw["paths"]["uk_shp"]
+    # paths.output_dir takes precedence; run.output_dir kept for back-compat.
+    output_dir = paths.get("output_dir") or run.get("output_dir")
+    if output_dir:
+        out["results"] = output_dir
+    if "uk_shp" in paths:
+        out["uk_shp"] = paths["uk_shp"]
     return out
 
 
@@ -96,8 +100,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--results",
-        default=cfg.get("results", "output/prototype"),
-        help="directory containing species prediction parquets (default: output/prototype)",
+        default=cfg.get("results", "output"),
+        help="directory containing species prediction parquets (default: output)",
     )
     p.add_argument(
         "--species",

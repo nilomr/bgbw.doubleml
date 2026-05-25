@@ -4,11 +4,11 @@ paths:
   weather_path: /mnt/w/projects/BGBW/data/metadata/weather/bgbw_weather.parquet
   january_weather_path: /mnt/w/projects/BGBW/data/metadata/weather/bgbw_january_weather.parquet
   uk_shp: /home/nilomr/projects/bgbw.metadata.pipeline/data/metadata/uk-shapefile/UK-shapefile.shp
+  output_dir: output/prototype   # absolute or relative to cwd; env var BGBW_OUTPUT_DIR overrides
 
 run:
   species: [red_kite]
   years: [2017, 2019, 2021, 2023]
-  output_dir: output/prototype
 
 model:
   n_pca_components: 5

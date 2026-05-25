@@ -36,16 +36,16 @@ Every run is driven by a YAML config file. Two are provided in [`configs/`](../c
 Copy either file to create a new experiment config. The sections are:
 
 ```yaml
-paths:                        # data locations — edit per machine
+paths:                        # all filesystem locations — edit per machine
   harmonized_dir: /data/bgbw/harmonized
   aef_dir: /data/bgbw/aef
   weather_path: /data/bgbw/weather/bgbw_weather.parquet
   january_weather_path: /data/bgbw/weather/bgbw_january_weather.parquet
+  output_dir: output/myrun   # absolute or relative to cwd; BGBW_OUTPUT_DIR env var overrides
 
 run:
   species: all                # "all" = all 73 species, or a list e.g. [blackbird, robin]
   years: [2017, 2019, 2021, 2023]
-  output_dir: output/myrun
 
 model:
   n_pca_components: 15        # PCA dim for embeddings; 0 = no PCA
@@ -66,7 +66,7 @@ ensemble:
 log_file: logs/myrun.log      # null to disable file logging
 ```
 
-A copy of the resolved config is written to `output/<run>/config.yaml` at the
+A copy of the resolved config is written to `<output_dir>/config.yaml` at the
 start of every run, so results are always traceable to the exact parameters used.
 
 Key notes:

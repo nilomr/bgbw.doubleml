@@ -5,11 +5,11 @@ paths:
   weather_path: /data/BS/userdata/nilo/projects/BGBW/metadata/weather/bgbw_weather.parquet
   january_weather_path: /data/BS/userdata/nilo/projects/BGBW/metadata/weather/bgbw_january_weather.parquet
   uk_shp: /data/BS/userdata/nilo/projects/BGBW/metadata/uk-shapefile/UK-shapefile.shp
+  output_dir: output/cluster   # absolute or relative to cwd; env var BGBW_OUTPUT_DIR overrides
 
 run:
   species: [wood_pigeon, house_sparrow,blackcap, red_kite, ring_necked_parakeet, collared_dove, starling, chaffinch, greenfinch, goldfinch, blue_tit, great_tit]
   years: [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
-  output_dir: output/cluster
 
 model:
   n_pca_components: 30
