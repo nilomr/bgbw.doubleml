@@ -1,4 +1,4 @@
-# bgbw.trends
+# bgbw.doubleml
 
 Estimates species distribution, relative abundance, and annual population
 trends from Big Garden Birdwatch (BGBW) survey data. For each species, a
